@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import replace
 
 import pytest
 
@@ -131,3 +132,162 @@ def test_puan_araligi_veritabaninda_zorunlu(conn: sqlite3.Connection):
                 created_at="2026-08-13T10:01:00+00:00",
             ),
         )
+
+
+def test_zorluk_ust_sinir_veritabaninda_zorunlu(conn: sqlite3.Connection):
+    db.save_template(conn, ornek_sablon())
+    db.save_question(
+        conn,
+        GeneratedQuestion(
+            id="q1",
+            template_id="t1",
+            bindings={},
+            text="metin",
+            answer_latex="x",
+            answer_key="anahtar",
+            created_at="2026-08-13T10:00:00+00:00",
+        ),
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        db.save_review(
+            conn,
+            Review(
+                question_id="q1",
+                approved=True,
+                difficulty=11,  # geçersiz: 1-10 dışı (üst sınır)
+                quality=8,
+                created_at="2026-08-13T10:01:00+00:00",
+            ),
+        )
+
+
+def test_kalite_alt_sinir_veritabaninda_zorunlu(conn: sqlite3.Connection):
+    db.save_template(conn, ornek_sablon())
+    db.save_question(
+        conn,
+        GeneratedQuestion(
+            id="q1",
+            template_id="t1",
+            bindings={},
+            text="metin",
+            answer_latex="x",
+            answer_key="anahtar",
+            created_at="2026-08-13T10:00:00+00:00",
+        ),
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        db.save_review(
+            conn,
+            Review(
+                question_id="q1",
+                approved=True,
+                difficulty=5,
+                quality=0,  # geçersiz: 1-10 dışı (alt sınır)
+                created_at="2026-08-13T10:01:00+00:00",
+            ),
+        )
+
+
+def test_kalite_ust_sinir_veritabaninda_zorunlu(conn: sqlite3.Connection):
+    db.save_template(conn, ornek_sablon())
+    db.save_question(
+        conn,
+        GeneratedQuestion(
+            id="q1",
+            template_id="t1",
+            bindings={},
+            text="metin",
+            answer_latex="x",
+            answer_key="anahtar",
+            created_at="2026-08-13T10:00:00+00:00",
+        ),
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        db.save_review(
+            conn,
+            Review(
+                question_id="q1",
+                approved=True,
+                difficulty=5,
+                quality=11,  # geçersiz: 1-10 dışı (üst sınır)
+                created_at="2026-08-13T10:01:00+00:00",
+            ),
+        )
+
+
+def test_onay_araligi_veritabaninda_zorunlu(conn: sqlite3.Connection):
+    # Review.approved tip ipucu bool'dur, ama Python çalışma zamanında
+    # dataclass alanlarını tip denetiminden geçirmez — bu yüzden genel API
+    # üzerinden (Review + save_review) 0/1 dışı bir değer üretmek mümkündür.
+    # CHECK (approved IN (0, 1)) bu durumda gerçek bir güvenlik ağıdır.
+    db.save_template(conn, ornek_sablon())
+    db.save_question(
+        conn,
+        GeneratedQuestion(
+            id="q1",
+            template_id="t1",
+            bindings={},
+            text="metin",
+            answer_latex="x",
+            answer_key="anahtar",
+            created_at="2026-08-13T10:00:00+00:00",
+        ),
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        db.save_review(
+            conn,
+            Review(
+                question_id="q1",
+                approved=2,  # geçersiz: tip ipucunu ihlal eden 0/1 dışı değer
+                difficulty=5,
+                quality=5,
+                created_at="2026-08-13T10:01:00+00:00",
+            ),
+        )
+
+
+def test_kaynak_soru_needs_review_true_gidis_donus(conn: sqlite3.Connection):
+    kaynak = SourceQuestion(
+        id="s1",
+        text="f(x) = 3x^2 + 5x fonksiyonunun türevi nedir?",
+        recipe="diff(3*x**2 + 5*x, x)",
+        objective="turev.polinom",
+        needs_review=True,
+    )
+    db.save_source(conn, kaynak)
+    assert db.load_sources(conn) == [kaynak]
+    assert db.load_sources(conn)[0].needs_review is True
+
+
+def test_degerlendirme_approved_false_gidis_donus(conn: sqlite3.Connection):
+    db.save_template(conn, ornek_sablon())
+    db.save_question(
+        conn,
+        GeneratedQuestion(
+            id="q1",
+            template_id="t1",
+            bindings={"p0": 4, "p1": -2},
+            text="metin",
+            answer_latex="8 x - 2",
+            answer_key="anahtar",
+            created_at="2026-08-13T10:00:00+00:00",
+        ),
+    )
+    degerlendirme = Review(
+        question_id="q1",
+        approved=False,
+        difficulty=6,
+        quality=8,
+        created_at="2026-08-13T10:01:00+00:00",
+    )
+    db.save_review(conn, degerlendirme)
+    assert db.load_reviews(conn) == [degerlendirme]
+    assert db.load_reviews(conn)[0].approved is False
+
+
+def test_sablon_kisitlar_gercek_icerikle_gidis_donus(conn: sqlite3.Connection):
+    sablon = replace(ornek_sablon(), constraints=("{p0} > {p1}", "{p0} != {p1}"))
+    db.save_template(conn, sablon)
+    yuklenen = db.load_templates(conn)
+    assert yuklenen == [sablon]
+    assert yuklenen[0].constraints == ("{p0} > {p1}", "{p0} != {p1}")
