@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - **Konu bağımsızlığı (ihlal edilemez).** Kaynak kodda hiçbir yerde belirli bir matematik konusuna özel dal, sabit, isim veya `if` bulunmaz. Bu kural testlerle korunur (Task 6, Adım 9). Yeni bir konu desteği = yeni kaynak sorusu, kod değişikliği değil.
-- **Python sürüm tabanı:** 3.11+. `from __future__ import annotations` her modülün ilk satırıdır.
+- **Python sürüm tabanı:** 3.11+. `from __future__ import annotations`, kod içeren her modülün (docstring varsa ondan sonraki) ilk satırıdır. Yalnız docstring içeren paket işaretçisi `__init__.py` dosyaları muaftır: içlerinde ek açıklama olmadığı için bu import hiçbir şey yapmaz.
 - **Veri yereldir.** Tek bir SQLite dosyası (`questioncrator.db`), varsayılan konum çalışma dizini. Ağ çağrısı Faz 1'de yoktur.
 - **Öğrenci kişisel verisi yoktur.** Faz 1 şemasında öğrenci tablosu bulunmaz (Faz 3'e ait).
 - **LLM Faz 1'de kullanılmaz.** Yalnız `LLMClient` protokolü + `NullLLMClient` yazılır (Task 11). Somut sağlayıcı Faz 2'de seçilir.
