@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+questioncrator.db
+build/
+dist/
+*.pdf
+*.aux
+*.log
+*.fls
+*.fdb_latexmk

@@ -1,0 +1,32 @@
+[project]
+name = "questioncrator"
+version = "0.1.0"
+description = "Havuz tabanlı otomatik soru üretim sistemi"
+requires-python = ">=3.11"
+dependencies = [
+    "sympy>=1.12",
+    "streamlit>=1.35",
+    "jinja2>=3.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.5"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["questioncrator*"]
+
+[tool.setuptools.package-data]
+"questioncrator.export" = ["templates/*.j2"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
