@@ -12,22 +12,22 @@
 
 ## Global Constraints
 
-- **Konu bağımsızlığı (ihlal edilemez).** Kaynak kodda hiçbir yerde belirli bir matematik konusuna özel dal, sabit, isim veya `if` bulunmaz. Bu kural testlerle korunur (Görev 6, Adım 9). Yeni bir konu desteği = yeni kaynak sorusu, kod değişikliği değil.
+- **Konu bağımsızlığı (ihlal edilemez).** Kaynak kodda hiçbir yerde belirli bir matematik konusuna özel dal, sabit, isim veya `if` bulunmaz. Bu kural testlerle korunur (Task 6, Adım 9). Yeni bir konu desteği = yeni kaynak sorusu, kod değişikliği değil.
 - **Python sürüm tabanı:** 3.11+. `from __future__ import annotations` her modülün ilk satırıdır.
 - **Veri yereldir.** Tek bir SQLite dosyası (`questioncrator.db`), varsayılan konum çalışma dizini. Ağ çağrısı Faz 1'de yoktur.
 - **Öğrenci kişisel verisi yoktur.** Faz 1 şemasında öğrenci tablosu bulunmaz (Faz 3'e ait).
-- **LLM Faz 1'de kullanılmaz.** Yalnız `LLMClient` protokolü + `NullLLMClient` yazılır (Görev 11). Somut sağlayıcı Faz 2'de seçilir.
+- **LLM Faz 1'de kullanılmaz.** Yalnız `LLMClient` protokolü + `NullLLMClient` yazılır (Task 11). Somut sağlayıcı Faz 2'de seçilir.
 - **Arayüz dili Türkçe.** Kullanıcıya görünen tüm dizeler Türkçedir. Kod tanımlayıcıları (fonksiyon/değişken adları) İngilizce, yorumlar Türkçedir.
 - **Rastgelelik enjekte edilir.** Üretim yapan hiçbir fonksiyon `random` modülünü global olarak çağırmaz; `rng: random.Random` parametresi alır. Testler `random.Random(0)` ile deterministiktir.
 - **Zaman enjekte edilir.** `created_at` üreten hiçbir fonksiyon içeride `datetime.now()` çağırmaz; ISO-8601 dize parametresi alır.
 - **Puanlar 1-10 tam sayıdır.** Zorluk ve kurgu ayrı ayrı. Puansız onay/red kaydı yasaktır (veri tabanı seviyesinde `CHECK` ile).
-- **Test komutu:** `pytest -q`. Lint: `ruff check .`. Her görev bunlar yeşilken biter.
+- **Test komutu:** `pytest -q`. Lint: `ruff check .`. Her task bunlar yeşilken biter.
 
 ---
 
 ## Dosya Yapısı
 
-Görevler bu yapıyı üretir. Her dosyanın tek bir sorumluluğu vardır.
+Taskler bu yapıyı üretir. Her dosyanın tek bir sorumluluğu vardır.
 
 ```
 questioncrator/
@@ -109,9 +109,9 @@ Aynı sayısal değer her iki dizede de **aynı** parametreye eşlenir. Şablonu
 
 ---
 
-### Görev 1: Proje iskeleti + güvenli matematik ortamı
+### Task 1: Proje iskeleti + güvenli matematik ortamı
 
-Bu görev projeyi ayağa kaldırır ve tüm sonraki görevlerin dayandığı tek temel yardımcıyı yazar: rastgele bir dizeyi SymPy nesnesine çeviren, `eval` güvenlik açığı ve sonsuz döngü riski kapatılmış bir ayrıştırıcı.
+Bu task projeyi ayağa kaldırır ve tüm sonraki tasklerin dayandığı tek temel yardımcıyı yazar: rastgele bir dizeyi SymPy nesnesine çeviren, `eval` güvenlik açığı ve sonsuz döngü riski kapatılmış bir ayrıştırıcı.
 
 **Files:**
 - Create: `pyproject.toml`
@@ -396,9 +396,9 @@ git commit -m "feat: proje iskeleti ve güvenli SymPy ayrıştırma ortamı"
 
 ---
 
-### Görev 2: Veri modeli + SQLite deposu
+### Task 2: Veri modeli + SQLite deposu
 
-Tüm sonraki görevler bu veri sınıflarını konuşur. Şema burada kilitlenir.
+Tüm sonraki taskler bu veri sınıflarını konuşur. Şema burada kilitlenir.
 
 **Files:**
 - Create: `questioncrator/models.py`
@@ -886,7 +886,7 @@ git commit -m "feat: veri modeli ve SQLite deposu"
 
 ---
 
-### Görev 3: Alım — yapılandırılmış Markdown
+### Task 3: Alım — yapılandırılmış Markdown
 
 Faz 1'in havuz girdisi tek bir Markdown dosyasıdır. Serbest format (Word/PDF/OCR) Faz 3'e aittir; burada onu taklit etmiyoruz.
 
@@ -1097,7 +1097,7 @@ git commit -m "feat: yapılandırılmış Markdown havuz alımı"
 
 ---
 
-### Görev 4: Şablon çıkarımı + render
+### Task 4: Şablon çıkarımı + render
 
 Sistemin kalbi. Kaynak sorudan otomatik, deterministik, konudan bağımsız şablon çıkarır. Hoca onayı yoktur (tasarım v0.5); kalite kapısı ileride soru seviyesindedir.
 
@@ -1403,7 +1403,7 @@ git commit -m "feat: otomatik şablon çıkarımı ve render"
 
 ---
 
-### Görev 5: Parametre örnekleme + kısıt süzme
+### Task 5: Parametre örnekleme + kısıt süzme
 
 **Files:**
 - Create: `questioncrator/generation/__init__.py`
@@ -1547,7 +1547,7 @@ git commit -m "feat: parametre örnekleme ve kısıt süzme"
 
 ---
 
-### Görev 6: Doğrulayıcı (A6)
+### Task 6: Doğrulayıcı (A6)
 
 Şablon onayı kaldırıldığı için matematiksel kalite kapısı tamamen burasıdır. Kontroller jeneriktir — hiçbiri "bu bir türev sorusu" bilgisine dayanmaz.
 
@@ -1815,7 +1815,7 @@ git commit -m "feat: jenerik SymPy doğrulayıcı ve konu bağımsızlığı bek
 
 ---
 
-### Görev 7: Üretim motoru — şablon seçimi, deneme modu, kopya filtresi
+### Task 7: Üretim motoru — şablon seçimi, deneme modu, kopya filtresi
 
 **Files:**
 - Create: `questioncrator/generation/engine.py`
@@ -2079,7 +2079,7 @@ git commit -m "feat: üretim motoru, deneme modu ve kopya filtresi"
 
 ---
 
-### Görev 8: Puan deposu + şablon skorları + durum geçişleri
+### Task 8: Puan deposu + şablon skorları + durum geçişleri
 
 Tasarımın "öğrenme sinyali" burada birikir. Faz 1'de sinyal **şablon durumu** olarak geri beslenir (deneme → etkin / devre dışı). Few-shot seçimi ve zorluk kalibrasyonu Faz 2'de aynı depodan okuyacak.
 
@@ -2321,7 +2321,7 @@ git commit -m "feat: puan deposu, şablon skorları ve durum geçişleri"
 
 ---
 
-### Görev 9: Çıktı — LaTeX sınav kağıdı + cevap anahtarı
+### Task 9: Çıktı — LaTeX sınav kağıdı + cevap anahtarı
 
 **Files:**
 - Create: `questioncrator/export/__init__.py`
@@ -2531,7 +2531,7 @@ git commit -m "feat: LaTeX sınav kağıdı ve cevap anahtarı çıktısı"
 
 ---
 
-### Görev 10: Streamlit uygulaması — Sekme 1 ve Sekme 2
+### Task 10: Streamlit uygulaması — Sekme 1 ve Sekme 2
 
 Streamlit kodu test edilmez; test edilebilir tüm mantık `app/state.py` içine, Streamlit'ten bağımsız fonksiyonlar olarak yazılır. `main.py` yalnız çizim yapar.
 
@@ -2944,7 +2944,7 @@ git commit -m "feat: Streamlit uygulaması — havuz ve kart akışı sekmeleri"
 
 ---
 
-### Görev 11: LLM soyutlaması (Faz 2 için sözleşme)
+### Task 11: LLM soyutlaması (Faz 2 için sözleşme)
 
 Faz 1'de hiçbir LLM çağrısı yapılmaz. Buradaki tek amaç, Faz 2'nin dayanacağı arayüzü şimdiden sabitlemek ve boru hattının LLM'siz de çalıştığını `NullLLMClient` ile göstermek.
 
@@ -3057,7 +3057,7 @@ class FewShotExample:
 
 Run: `pytest -q && ruff check .`
 Expected: tüm test dosyaları yeşil, ruff temiz. Bu, Faz 1'in bütünlük kontrolüdür —
-tek tek görevler geçerken bütün başarısız oluyorsa aradaki sözleşme kırılmıştır.
+tek tek taskler geçerken bütün başarısız oluyorsa aradaki sözleşme kırılmıştır.
 
 - [ ] **Adım 5: Commit ve Faz 1 etiketi**
 
@@ -3072,11 +3072,11 @@ git push -u origin master --tags
 
 ## Faz 1 Bitiş Kontrolü
 
-Bu görevler bittiğinde şunlar doğrulanmış olmalıdır:
+Bu taskler bittiğinde şunlar doğrulanmış olmalıdır:
 
 - [ ] `pytest -q` tamamen yeşil, `ruff check .` temiz.
 - [ ] `tests/test_topic_agnostic.py` geçiyor — kaynak kodda hiçbir konu adı yok, üç farklı konu aynı boru hattından geçiyor.
-- [ ] `streamlit run questioncrator/app/main.py` ile Görev 10 Adım 6'daki beş maddelik elle kontrol listesi tamamlanmış.
+- [ ] `streamlit run questioncrator/app/main.py` ile Task 10 Adım 6'daki beş maddelik elle kontrol listesi tamamlanmış.
 - [ ] Deneme modu gözlemlenmiş: yeni şablondan bir partide en fazla 2 kart çıkıyor.
 - [ ] `.tex` çıktıları LaTeX'te derleniyor (pdflatex kuruluysa `build_pdf` ile).
 
