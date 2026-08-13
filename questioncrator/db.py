@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import asdict
 from pathlib import Path
 
 from questioncrator.models import (
@@ -114,7 +115,7 @@ def save_template(conn: sqlite3.Connection, template: Template) -> None:
             template.source_id,
             template.skeleton,
             template.recipe,
-            json.dumps([p.__dict__ for p in template.parameters]),
+            json.dumps([asdict(p) for p in template.parameters]),
             json.dumps(list(template.constraints)),
             json.dumps(template.seed_bindings),
             template.seed_answer_ops,
