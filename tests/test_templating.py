@@ -84,6 +84,30 @@ def test_render_metin_ve_recete():
     assert render.render_recipe(t, {"p0": 4, "p1": -2}) == "diff((4)*x**2 + (-2)*x, x)"
 
 
+def test_yildiz_us_gosterimi_metinde_korunur():
+    """`**2` üs gösterimi metinde de yapısaldır; başka bir yerdeki aynı
+    değerli katsayı parametreleşirken üs değişmemelidir."""
+    s = kaynak(
+        "f(x) = x**2 + 2y ifadesidir.",
+        "x**2 + 2*y",
+    )
+    t = extract.extract_template(s, "t1")
+    assert t.recipe == "x**2 + {p0}*y"
+    assert t.skeleton == "f(x) = x**2 + {p0}y ifadesidir."
+    assert t.seed_bindings == {"p0": 2}
+
+
+def test_coklu_satir_recete_dogru_degistirilir():
+    """İki satırlı reçetede her satırdaki jetonlar doğru konumdan değişmeli."""
+    s = kaynak(
+        "A = [[3, 1], [4, 5]] matrisinin determinantını bulunuz.",
+        "Matrix([[3, 1],\n[4, 5]]).det()",
+    )
+    t = extract.extract_template(s, "t1")
+    assert t.recipe == "Matrix([[{p0}, {p1}],\n[{p2}, {p3}]]).det()"
+    assert t.seed_bindings == {"p0": 3, "p1": 1, "p2": 4, "p3": 5}
+
+
 def test_render_recete_negatif_degeri_parantezler():
     """Parantezsiz `-3**2` = -9 olurdu; parantezli `(-3)**2` = 9. Kritik."""
     t = Template(

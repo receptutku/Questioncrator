@@ -72,13 +72,15 @@ def _parametrize_text(text: str, value_to_param: dict[int, str]) -> str:
     """Metindeki sayıları yer tutucuya çevirir.
 
     Uzun değerden kısaya gidilir ki `12` varken `1` önce eşleşmesin.
-    Lookbehind üs (`^2`, `**2`) ve kelime içi rakamları korur. Lookahead
-    yalnız bir sonraki karakterin rakam ya da nokta olmasını engeller;
-    bir değişken harfinin (`3x` içindeki `x` gibi) hemen ardından
-    gelmesine izin verir, aksi halde katsayılar hiç eşleşmezdi.
+    Lookbehind üs (`^2`, `**2`) ve kelime içi rakamları korur — sınıfa
+    hem `^` hem `*` dahildir, ikisi de üs gösterimlerinde önceki
+    karakter olabilir. Lookahead yalnız bir sonraki karakterin rakam ya
+    da nokta olmasını engeller; bir değişken harfinin (`3x` içindeki
+    `x` gibi) hemen ardından gelmesine izin verir, aksi halde
+    katsayılar hiç eşleşmezdi.
     """
     for value in sorted(value_to_param, key=lambda v: -len(str(v))):
-        pattern = rf"(?<![\w.^]){re.escape(str(value))}(?![\d.])"
+        pattern = rf"(?<![\w.*^]){re.escape(str(value))}(?![\d.])"
         text = re.sub(pattern, "{" + value_to_param[value] + "}", text)
     return text
 
