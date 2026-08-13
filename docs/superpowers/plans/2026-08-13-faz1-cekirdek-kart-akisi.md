@@ -1324,7 +1324,7 @@ def _parametrize_text(text: str, value_to_param: dict[int, str]) -> str:
     `(?![\w.])` olsaydı hiçbir katsayı eşleşmezdi.)
     """
     for value in sorted(value_to_param, key=lambda v: -len(str(v))):
-        desen = rf"(?<![\w.^]){re.escape(str(value))}(?![\d.])"
+        desen = rf"(?<![\w.*^]){re.escape(str(value))}(?![\d.])"
         text = re.sub(desen, "{" + value_to_param[value] + "}", text)
     return text
 
