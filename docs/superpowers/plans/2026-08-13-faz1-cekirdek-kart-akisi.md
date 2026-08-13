@@ -17,7 +17,8 @@
 - **Veri yereldir.** Tek bir SQLite dosyası (`questioncrator.db`), varsayılan konum çalışma dizini. Ağ çağrısı Faz 1'de yoktur.
 - **Öğrenci kişisel verisi yoktur.** Faz 1 şemasında öğrenci tablosu bulunmaz (Faz 3'e ait).
 - **LLM Faz 1'de kullanılmaz.** Yalnız `LLMClient` protokolü + `NullLLMClient` yazılır (Task 11). Somut sağlayıcı Faz 2'de seçilir.
-- **Arayüz dili Türkçe.** Kullanıcıya görünen tüm dizeler Türkçedir. Kod tanımlayıcıları (fonksiyon/değişken adları) İngilizce, yorumlar Türkçedir.
+- **Arayüz dili Türkçe.** Kullanıcıya görünen tüm dizeler Türkçedir. Kod tanımlayıcıları (fonksiyon, sınıf, parametre, sabit **ve yerel değişken** adları) İngilizce, docstring ve yorumlar Türkçedir.
+  - **Uygulama notu (Task 3 review'ında karara bağlandı):** Bu belgedeki kod bloklarının bazılarında yerel değişkenler Türkçe yazılmıştır (`sonuc`, `sablon`, `kartlar`, `notlar`, ...). Bunlar **bağlayıcı değildir**; uygulayıcı bu adları İngilizceye çevirir (`result`, `template`, `cards`, `notes`, ...). Anlam ve davranış değişmez. Bağlayıcı olan, Interfaces bloklarında geçen genel API adlarıdır — onlar zaten İngilizcedir ve harfi harfine kullanılmalıdır.
 - **Rastgelelik enjekte edilir.** Üretim yapan hiçbir fonksiyon `random` modülünü global olarak çağırmaz; `rng: random.Random` parametresi alır. Testler `random.Random(0)` ile deterministiktir.
 - **Zaman enjekte edilir.** `created_at` üreten hiçbir fonksiyon içeride `datetime.now()` çağırmaz; ISO-8601 dize parametresi alır.
 - **Puanlar 1-10 tam sayıdır.** Zorluk ve kurgu ayrı ayrı. Puansız onay/red kaydı yasaktır (veri tabanı seviyesinde `CHECK` ile).
