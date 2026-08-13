@@ -1317,10 +1317,14 @@ def _parametrize_text(text: str, value_to_param: dict[int, str]) -> str:
     """Metindeki sayıları yer tutucuya çevirir.
 
     Uzun değerden kısaya gidilir ki `12` varken `1` önce eşleşmesin.
-    Lookbehind'lar üs (`^2`, `**2`) ve kelime içi rakamları korur.
+    Lookbehind üs (`^2`, `**2`) ve kelime içi rakamları korur; lookahead
+    yalnız rakam ve ondalık noktayı engeller — harf engellenmez, çünkü
+    `3x` gibi bir katsayının hemen ardından değişken gelir ve o da
+    parametreleşmelidir. (Task 4 uygulamasında bulunan hata: lookahead
+    `(?![\w.])` olsaydı hiçbir katsayı eşleşmezdi.)
     """
     for value in sorted(value_to_param, key=lambda v: -len(str(v))):
-        desen = rf"(?<![\w.^]){re.escape(str(value))}(?![\w.])"
+        desen = rf"(?<![\w.^]){re.escape(str(value))}(?![\d.])"
         text = re.sub(desen, "{" + value_to_param[value] + "}", text)
     return text
 
