@@ -25,7 +25,10 @@ class EvaluationTimeout(Exception):
 
 def _allowed_namespace() -> dict[str, object]:
     ns: dict[str, object] = {name: getattr(sympy, name) for name in sympy.__all__}
-    # Yerleşik Python fonksiyonlarına erişimi kapat; sympy adları yeter.
+    # Ek önlem (defense-in-depth): asıl koruma `parse_expr`'in `auto_symbol`
+    # dönüşümünden gelir — ad alanında olmayan her çağrı, gerçek Python
+    # nesnesine değil sembolik bir sympy Function'a bağlanır. Bu satır o
+    # yolun dışında kalan olası bir çağrı yoluna karşı ek bir kapaktır.
     ns["__builtins__"] = {}
     return ns
 

@@ -40,9 +40,28 @@ def test_cift_alt_cizgi_reddedilir():
         mathenv.parse("(1).__class__")
 
 
-def test_builtin_erisimi_yok():
-    with pytest.raises(Exception):  # noqa: B017 - hangi istisna türü fırlatılırsa fırlatılsın erişim kapalı olmalı
-        mathenv.parse("open('/etc/passwd')")
+def test_allowed_namespace_builtinlari_kapali():
+    """`_allowed_namespace()` sözlüğünde `__builtins__` boş kalmalı.
+
+    Bu, `parse_expr`'in ad-dönüşüm hattından bağımsız, doğrudan sözlük
+    düzeyinde bir garanti; ek önlem (defense-in-depth) olarak tutulur.
+    """
+    ns = mathenv._allowed_namespace()
+    assert ns["__builtins__"] == {}
+
+
+def test_bilinmeyen_ad_gercek_pythona_ulasmadan_sembolik_kalir():
+    """Ad alanında olmayan bir çağrı, gerçek bir Python nesnesine değil,
+    sembolik bir sympy `Function`'a bağlanır.
+
+    `parse_expr`'in `auto_symbol` dönüşümü, ad alanında bulunmayan her adı
+    -- güvenli ya da tehlikeli fark etmeksizin -- eval'e ulaşmadan önce
+    sembolik bir `Function` çağrısına çevirir. Gerçekten çağrılmış olsaydı
+    sonuç bir dosya nesnesi olur ve dizgi gösterimi "open(1)" olmazdı.
+    """
+    sonuc = mathenv.parse("open(1)")
+    assert isinstance(sonuc, sympy.Basic)
+    assert str(sonuc) == "open(1)"
 
 
 def test_zaman_asimi_yukselir(monkeypatch):
