@@ -1826,7 +1826,7 @@ git commit -m "feat: jenerik SymPy doğrulayıcı ve konu bağımsızlığı bek
 - Produces:
   - `generation.engine.TRIAL_BATCH_CAP = 2`
   - `generation.engine.generate_from_template(template, *, count, rng, now, seen_answer_keys, id_prefix) -> list[GeneratedQuestion]`
-  - `generation.engine.generate_batch(templates, *, total, rng, now, seen_answer_keys, objectives=None) -> list[GeneratedQuestion]`
+  - `generation.engine.generate_batch(templates, *, total, rng, now, seen_answer_keys, objectives=None, id_prefix="q") -> list[GeneratedQuestion]`
 
 **Kurallar.**
 - `status == "disabled"` şablonlar hiç kullanılmaz.
@@ -2022,8 +2022,14 @@ def generate_batch(
     now: str,
     seen_answer_keys: set[str],
     objectives: set[str] | None = None,
+    id_prefix: str = "q",
 ) -> list[GeneratedQuestion]:
-    """Şablonlar arasında dolaşarak toplam `total` soruya kadar üretir."""
+    """Şablonlar arasında dolaşarak toplam `total` soruya kadar üretir.
+
+    `id_prefix` partiyi ayırt eder. Aynı şablondan ikinci bir parti
+    üretildiğinde kimlikler çakışmasın diye çağıran taraf bunu benzersiz
+    yapmakla yükümlüdür (bkz. `app.state.produce_cards`).
+    """
     uygun = [
         t
         for t in templates
@@ -2049,7 +2055,7 @@ def generate_batch(
             rng=rng,
             now=now,
             seen_answer_keys=gorulen,
-            id_prefix=f"q{len(sonuc)}",
+            id_prefix=f"{id_prefix}{len(sonuc)}",
         )
         gorulen.update(s.answer_key for s in parca)
         sonuc.extend(parca)
@@ -2595,7 +2601,17 @@ def test_kart_uretimi_ve_bekleyenler(conn):
     assert kartlar != []
     # Deneme modunda 3 şablon x 2 = en fazla 6
     assert len(kartlar) <= 6
-    assert [k.id for k in state.pending_cards(conn)] == [k.id for k in kartlar]
+    # Sıra önemli değil: bekleyenler kimliğe göre sıralı gelir.
+    assert {k.id for k in state.pending_cards(conn)} == {k.id for k in kartlar}
+
+
+def test_ikinci_parti_birincinin_kimliklerini_ezmiyor(conn):
+    state.ingest_markdown_pool(conn, VERI.read_text(encoding="utf-8"))
+    ilk = state.produce_cards(conn, total=6, rng=random.Random(0), now=SIMDI)
+    ikinci = state.produce_cards(conn, total=6, rng=random.Random(1), now=SIMDI)
+    assert ikinci != []
+    assert {k.id for k in ilk}.isdisjoint({k.id for k in ikinci})
+    assert len(db.load_questions(conn)) == len(ilk) + len(ikinci)
 
 
 def test_degerlendirilen_kart_bekleyenlerden_cikar(conn):
@@ -2716,6 +2732,7 @@ def produce_cards(
     now: str,
     objectives: set[str] | None = None,
 ) -> list[GeneratedQuestion]:
+    mevcut = len(db.load_questions(conn))
     kartlar = engine.generate_batch(
         db.load_templates(conn),
         total=total,
@@ -2723,6 +2740,9 @@ def produce_cards(
         now=now,
         seen_answer_keys=db.load_answer_keys(conn),
         objectives=objectives,
+        # Parti öneki, var olan soru sayısından türetilir: ikinci parti
+        # birincinin kimliklerinin üstüne yazamaz.
+        id_prefix=f"b{mevcut}-",
     )
     for kart in kartlar:
         db.save_question(conn, kart)
@@ -2765,7 +2785,7 @@ def approved_questions(conn: sqlite3.Connection) -> list[GeneratedQuestion]:
 - [ ] **Adım 4: Testlerin geçtiğini doğrula**
 
 Run: `pytest tests/test_app_state.py -q && ruff check .`
-Expected: 6 passed.
+Expected: 7 passed.
 
 - [ ] **Adım 5: `main.py` yaz (Streamlit çizimi)**
 
