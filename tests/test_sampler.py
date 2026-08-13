@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import random
 
+import pytest
+
 from questioncrator.generation import sampler
 from questioncrator.models import Parameter, Template
 
@@ -49,3 +51,19 @@ def test_satisfies_constraints_dogrudan():
     t = sablon(constraints=("{p0} > {p1}",))
     assert sampler.satisfies_constraints(t, {"p0": 5, "p1": 2}) is True
     assert sampler.satisfies_constraints(t, {"p0": 2, "p1": 5}) is False
+
+
+def test_tamamen_haric_tutulan_hata_verir():
+    """Parametrenin tüm değer aralığı hariç tutulmuşsa ValueError yükseltir."""
+    t = Template(
+        id="t1",
+        source_id="s1",
+        skeleton="{p0}",
+        recipe="{p0}",
+        parameters=(Parameter("p0", 0, 0, (0,)),),  # Sadece 0, fakat 0 hariç tutuluyor
+        constraints=(),
+        seed_bindings={},
+        seed_answer_ops=0,
+    )
+    with pytest.raises(ValueError):
+        sampler.sample_bindings(t, random.Random(0))

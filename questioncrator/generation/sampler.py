@@ -15,10 +15,17 @@ from questioncrator.models import Parameter, Template
 
 
 def _sample_parameter(param: Parameter, rng: random.Random) -> int:
-    candidate = rng.randint(param.low, param.high)
-    while candidate in param.exclude:
-        candidate = rng.randint(param.low, param.high)
-    return candidate
+    """Parametrenin değer aralığından, hariç tutulanlar dışında bir değer çeker.
+
+    Tüm değer aralığı hariç tutulmuşsa ValueError yükseltir.
+    """
+    allowed = [v for v in range(param.low, param.high + 1) if v not in param.exclude]
+    if not allowed:
+        raise ValueError(
+            f"Parametre '{param.name}' için geçerli aday yok: "
+            f"aralık [{param.low}, {param.high}], hariç tutulanlar {param.exclude}"
+        )
+    return rng.choice(allowed)
 
 
 def satisfies_constraints(template: Template, bindings: dict[str, int]) -> bool:
