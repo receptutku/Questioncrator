@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import multiprocessing
 import sqlite3
 from dataclasses import replace
 
@@ -422,3 +423,125 @@ def test_sinav_gidis_donus_ve_siralama(conn):
     assert db.get_exam(conn, "ex1") == eski
     db.delete_exam(conn, "ex1")
     assert db.get_exam(conn, "ex1") is None
+
+
+# --- eşzamanlı göç ----------------------------------------------------------
+
+
+def _eszamanli_baglan(yol: str, bariyer) -> None:
+    bariyer.wait(timeout=60)
+    db.connect(yol).close()
+
+
+def test_eszamanli_baglantilar_gocu_bir_kez_uygular(tmp_path):
+    ctx = multiprocessing.get_context("spawn")
+    for tur in range(4):
+        yol = str(tmp_path / f"es-{tur}.db")
+        bariyer = ctx.Barrier(4)
+        surecler = [
+            ctx.Process(target=_eszamanli_baglan, args=(yol, bariyer)) for _ in range(4)
+        ]
+        for s in surecler:
+            s.start()
+        for s in surecler:
+            s.join(timeout=120)
+        assert [s.exitcode for s in surecler] == [0, 0, 0, 0], f"tur {tur}"
+        kontrol = db.connect(yol)
+        assert kontrol.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
+        kontrol.close()
+
+
+# --- hata sonrası işlem kapanır ---------------------------------------------
+
+
+def _hazir_dosya(tmp_path):
+    yol = tmp_path / "yazma.db"
+    c = db.connect(yol)
+    db.save_source(c, SourceQuestion(id="s1", text="t", recipe="2*x"))
+    db.save_template(c, _sablon())
+    db.save_question(c, _soru("q1"))
+    db.save_review(c, Review("q1", True, 5, 8, "2026-09-15T10:00:00+00:00"))
+    db.save_student(c, Student(id="st1", alias="A", created_at="x"))
+    db.save_exam(c, Exam(id="ex1", title="S", created_at="x"))
+    for tablo in ("source_questions", "reviews", "exams"):
+        c.execute(
+            f"CREATE TRIGGER engel_{tablo} BEFORE DELETE ON {tablo} "
+            "BEGIN SELECT RAISE(ABORT, 'engel'); END"
+        )
+    c.commit()
+    return yol, c
+
+
+_BOZUK_YAZMALAR = {
+    "save_source": lambda c: db.save_source(c, SourceQuestion(id="s2", text=None)),
+    "delete_source": lambda c: db.delete_source(c, "s1"),
+    "save_template": lambda c: db.save_template(c, replace(_sablon(), status="bogus")),
+    "set_template_status": lambda c: db.set_template_status(c, "t1", "bogus"),
+    "save_question": lambda c: db.save_question(c, _soru("q9", tid="olmayan")),
+    "set_question_archived": lambda c: db.set_question_archived(c, "q1", 2),
+    "save_review": lambda c: db.save_review(c, Review("q1", True, 0, 8, "x")),
+    "delete_review": lambda c: db.delete_review(c, "q1"),
+    "save_student": lambda c: db.save_student(c, Student(id="st2", alias="B", level=11)),
+    "assign_questions": lambda c: db.assign_questions(c, "st1", ["olmayan"], "x"),
+    "save_exam": lambda c: db.save_exam(c, Exam(id="ex2", title="S", kind="bogus")),
+    "delete_exam": lambda c: db.delete_exam(c, "ex1"),
+}
+
+
+def test_tum_yazma_fonksiyonlari_kapsaniyor():
+    yazanlar = {
+        ad for ad in vars(db)
+        if ad.startswith(("save_", "delete_", "set_", "assign_")) and callable(getattr(db, ad))
+    }
+    assert yazanlar == set(_BOZUK_YAZMALAR)
+
+
+@pytest.mark.parametrize("ad", sorted(_BOZUK_YAZMALAR))
+def test_yazma_hatasi_islemi_acik_birakmaz(tmp_path, ad):
+    yol, c1 = _hazir_dosya(tmp_path)
+    with pytest.raises(sqlite3.DatabaseError):
+        _BOZUK_YAZMALAR[ad](c1)
+    assert not c1.in_transaction
+    c2 = db.connect(yol)
+    c2.execute("PRAGMA busy_timeout = 200")
+    db.save_source(c2, SourceQuestion(id="s3", text="ikinci"))
+    assert db.get_source(c1, "s3") is not None
+    if ad == "delete_source":
+        assert db.get_template(c1, "t1").status == "trial"
+    c2.close()
+    c1.close()
+
+
+# --- sıralama ve bayrak kısıtları -------------------------------------------
+
+
+def test_ayni_zamanli_kaynaklar_ekleme_sirasiyla_doner(conn):
+    for sid in ("s_f", "s_a", "s_c"):
+        db.save_source(conn, SourceQuestion(id=sid, text=sid, created_at="2026-09-15"))
+    assert [s.id for s in db.load_sources(conn)] == ["s_f", "s_a", "s_c"]
+
+
+def test_ayni_zamanli_sablon_soru_sinav_ekleme_sirasini_korur(conn):
+    for tid in ("t_z", "t_a"):
+        db.save_template(conn, _sablon(tid))
+    assert [t.id for t in db.load_templates(conn)] == ["t_z", "t_a"]
+    assert [t.id for t in db.load_templates_for_source(conn, "s1")] == ["t_z", "t_a"]
+    for qid in ("q_z", "q_a"):
+        db.save_question(conn, _soru(qid, tid="t_z"))
+    assert [q.id for q in db.load_questions(conn)] == ["q_z", "q_a"]
+    for qid in ("q_z", "q_a"):
+        db.save_review(conn, Review(qid, True, 5, 5, "2026-09-15"))
+    assert [r.question_id for r in db.load_reviews(conn)] == ["q_z", "q_a"]
+    for eid in ("ex_a", "ex_z"):
+        db.save_exam(conn, Exam(id=eid, title="S", created_at="2026-09-15"))
+    assert [e.id for e in db.load_exams(conn)] == ["ex_z", "ex_a"]
+    for sid in ("st_z", "st_a"):
+        db.save_student(conn, Student(id=sid, alias="Ayni", created_at="x"))
+    assert [s.id for s in db.load_students(conn)] == ["st_z", "st_a"]
+
+
+@pytest.mark.parametrize("alan", ["archived", "similar_given"])
+def test_soru_bayraklari_0_1_disi_yazilamaz(conn, alan):
+    db.save_template(conn, _sablon())
+    with pytest.raises(sqlite3.IntegrityError):
+        db.save_question(conn, _soru(**{alan: 2}))

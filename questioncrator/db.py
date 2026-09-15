@@ -4,13 +4,20 @@ Her çalışma alanı (dershane) kendi SQLite dosyasındadır; bu modül kiracı
 kavramını bilmez. Karmaşık alanlar JSON metin sütunlarında saklanır.
 Şema `PRAGMA user_version` ile sürümlenir; `MIGRATIONS` yalnız sona
 eklenerek büyür, var olan bir göç asla değiştirilmez.
+
+İşlem kuralı: her yazma fonksiyonu kendi işlemini açar ve commit eder;
+hata olursa geri alıp istisnayı yeniden yükseltir. Bu yüzden yazma
+fonksiyonları dış bir işlemin içinde çağrılmamalıdır. `migrate` de
+başlamadan önce bekleyen işlemi commit eder.
 """
 
 from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterable
+import time
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
 
@@ -88,8 +95,10 @@ ALTER TABLE generated_questions ADD COLUMN correct_index INTEGER;
 ALTER TABLE generated_questions ADD COLUMN difficulty_estimate REAL NOT NULL DEFAULT 5.0;
 ALTER TABLE generated_questions ADD COLUMN student_id TEXT REFERENCES students(id);
 ALTER TABLE generated_questions ADD COLUMN created_by TEXT;
-ALTER TABLE generated_questions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE generated_questions ADD COLUMN similar_given INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE generated_questions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0
+    CHECK (archived IN (0, 1));
+ALTER TABLE generated_questions ADD COLUMN similar_given INTEGER NOT NULL DEFAULT 0
+    CHECK (similar_given IN (0, 1));
 
 ALTER TABLE reviews ADD COLUMN reviewer_id TEXT;
 
@@ -120,17 +129,52 @@ MIGRATIONS: tuple[str, ...] = (_V1, _V2)
 SCHEMA_VERSION = len(MIGRATIONS)
 
 
+def _statements(script: str) -> Iterator[str]:
+    buffer = ""
+    for line in script.splitlines(keepends=True):
+        buffer += line
+        if sqlite3.complete_statement(buffer):
+            yield buffer.strip()
+            buffer = ""
+    if buffer.strip():
+        raise ValueError("göç betiğinde tamamlanmamış SQL ifadesi")
+
+
 def migrate(conn: sqlite3.Connection) -> None:
-    """Eksik göçleri sırayla, her birini tek işlemde uygular."""
-    current = conn.execute("PRAGMA user_version").fetchone()[0]
-    for version in range(current + 1, SCHEMA_VERSION + 1):
-        script = f"BEGIN;\n{MIGRATIONS[version - 1]}\nPRAGMA user_version = {version};\nCOMMIT;"
+    """Eksik göçleri sırayla, her birini ayrı bir `BEGIN IMMEDIATE` işleminde uygular.
+
+    Sürüm, yazma kilidi alındıktan sonra yeniden okunur: aynı dosyaya
+    eşzamanlı bağlanan süreçlerden yalnız biri bir adımı uygular, diğerleri
+    kilidi bekler (busy timeout) ve adımı atlar.
+    """
+    if conn.in_transaction:
+        conn.commit()
+    for version in range(1, SCHEMA_VERSION + 1):
+        if conn.execute("PRAGMA user_version").fetchone()[0] >= version:
+            continue
+        conn.execute("BEGIN IMMEDIATE")
         try:
-            conn.executescript(script)
-        except sqlite3.Error:
-            if conn.in_transaction:
-                conn.execute("ROLLBACK")
+            if conn.execute("PRAGMA user_version").fetchone()[0] < version:
+                for statement in _statements(MIGRATIONS[version - 1]):
+                    conn.execute(statement)
+                conn.execute(f"PRAGMA user_version = {version}")
+        except BaseException:
+            conn.rollback()
             raise
+        conn.commit()
+
+
+def _enable_wal(conn: sqlite3.Connection, timeout: float) -> None:
+    """WAL kipine geçer; bu PRAGMA meşgul işleyiciyi çağırmadığından elle yeniden dener."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            conn.execute("PRAGMA journal_mode = WAL")
+            return
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc) or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
 
 
 def connect(
@@ -141,31 +185,43 @@ def connect(
     `check_same_thread=False` bağlantının başka bir iş parçacığında
     kullanılacağı durumlar içindir (ör. web çerçevesinin iş havuzu).
     """
-    conn = sqlite3.connect(path, check_same_thread=check_same_thread, timeout=5.0)
+    timeout = 5.0
+    conn = sqlite3.connect(path, check_same_thread=check_same_thread, timeout=timeout)
     conn.row_factory = sqlite3.Row
-    # PRAGMA'lar işlem dışında verilmelidir; göçten önce.
+    # PRAGMA'lar işlem dışında verilmelidir (journal_mode işlem içinde
+    # değiştirilemez); bu yüzden göçten önce.
     conn.execute("PRAGMA foreign_keys = ON")
     if str(path) != ":memory:":
-        conn.execute("PRAGMA journal_mode = WAL")
+        _enable_wal(conn, timeout)
     migrate(conn)
     return conn
+
+
+@contextmanager
+def _write(conn: sqlite3.Connection) -> Iterator[None]:
+    """Başarıda commit; herhangi bir istisnada geri al ve yeniden yükselt.
+
+    Başarısız bir ifadenin açtığı örtük işlem açık kalırsa yazma kilidi
+    tutulur ve aynı dosyaya bağlanan diğer bağlantılar kilitlenir.
+    """
+    try:
+        yield
+    except BaseException:
+        conn.rollback()
+        raise
+    conn.commit()
 
 
 def _upsert(conn: sqlite3.Connection, table: str, key: str, row: dict[str, object]) -> None:
     columns = ", ".join(row)
     placeholders = ", ".join("?" for _ in row)
     updates = ", ".join(f"{c} = excluded.{c}" for c in row if c != key)
-    try:
+    with _write(conn):
         conn.execute(
             f"INSERT INTO {table} ({columns}) VALUES ({placeholders}) "
             f"ON CONFLICT({key}) DO UPDATE SET {updates}",
             tuple(row.values()),
         )
-    except sqlite3.Error:
-        # Başarısız ifadenin açtığı örtük işlem yazma kilidini tutmasın.
-        conn.rollback()
-        raise
-    conn.commit()
 
 
 # --- kaynak sorular ---------------------------------------------------------
@@ -200,7 +256,7 @@ def _source(r: sqlite3.Row) -> SourceQuestion:
 
 
 def load_sources(conn: sqlite3.Connection) -> list[SourceQuestion]:
-    rows = conn.execute("SELECT * FROM source_questions ORDER BY created_at, id").fetchall()
+    rows = conn.execute("SELECT * FROM source_questions ORDER BY created_at, rowid").fetchall()
     return [_source(r) for r in rows]
 
 
@@ -211,9 +267,11 @@ def get_source(conn: sqlite3.Connection, source_id: str) -> SourceQuestion | Non
 
 def delete_source(conn: sqlite3.Connection, source_id: str) -> None:
     """Kaynağı siler; şablonları üretilmiş soruları korumak için silinmez, kapatılır."""
-    conn.execute("UPDATE templates SET status = 'disabled' WHERE source_id = ?", (source_id,))
-    conn.execute("DELETE FROM source_questions WHERE id = ?", (source_id,))
-    conn.commit()
+    with _write(conn):
+        conn.execute(
+            "UPDATE templates SET status = 'disabled' WHERE source_id = ?", (source_id,)
+        )
+        conn.execute("DELETE FROM source_questions WHERE id = ?", (source_id,))
 
 
 # --- şablonlar --------------------------------------------------------------
@@ -255,7 +313,7 @@ def _template(r: sqlite3.Row) -> Template:
 
 
 def load_templates(conn: sqlite3.Connection) -> list[Template]:
-    return [_template(r) for r in conn.execute("SELECT * FROM templates ORDER BY id")]
+    return [_template(r) for r in conn.execute("SELECT * FROM templates ORDER BY rowid")]
 
 
 def get_template(conn: sqlite3.Connection, template_id: str) -> Template | None:
@@ -264,13 +322,13 @@ def get_template(conn: sqlite3.Connection, template_id: str) -> Template | None:
 
 
 def load_templates_for_source(conn: sqlite3.Connection, source_id: str) -> list[Template]:
-    rows = conn.execute("SELECT * FROM templates WHERE source_id = ? ORDER BY id", (source_id,))
+    rows = conn.execute("SELECT * FROM templates WHERE source_id = ? ORDER BY rowid", (source_id,))
     return [_template(r) for r in rows]
 
 
 def set_template_status(conn: sqlite3.Connection, template_id: str, status: str) -> None:
-    conn.execute("UPDATE templates SET status = ? WHERE id = ?", (status, template_id))
-    conn.commit()
+    with _write(conn):
+        conn.execute("UPDATE templates SET status = ? WHERE id = ?", (status, template_id))
 
 
 # --- üretilen sorular -------------------------------------------------------
@@ -318,7 +376,7 @@ def load_questions(
     conn: sqlite3.Connection, *, include_archived: bool = True
 ) -> list[GeneratedQuestion]:
     where = "" if include_archived else "WHERE archived = 0"
-    rows = conn.execute(f"SELECT * FROM generated_questions {where} ORDER BY created_at, id")
+    rows = conn.execute(f"SELECT * FROM generated_questions {where} ORDER BY created_at, rowid")
     return [_question(r) for r in rows]
 
 
@@ -328,10 +386,11 @@ def get_question(conn: sqlite3.Connection, question_id: str) -> GeneratedQuestio
 
 
 def set_question_archived(conn: sqlite3.Connection, question_id: str, archived: bool) -> None:
-    conn.execute(
-        "UPDATE generated_questions SET archived = ? WHERE id = ?", (int(archived), question_id)
-    )
-    conn.commit()
+    with _write(conn):
+        conn.execute(
+            "UPDATE generated_questions SET archived = ? WHERE id = ?",
+            (int(archived), question_id),
+        )
 
 
 def load_answer_keys(conn: sqlite3.Connection) -> set[str]:
@@ -365,7 +424,7 @@ def _review(r: sqlite3.Row) -> Review:
 
 
 def load_reviews(conn: sqlite3.Connection) -> list[Review]:
-    rows = conn.execute("SELECT * FROM reviews ORDER BY created_at, question_id")
+    rows = conn.execute("SELECT * FROM reviews ORDER BY created_at, rowid")
     return [_review(r) for r in rows]
 
 
@@ -375,8 +434,8 @@ def get_review(conn: sqlite3.Connection, question_id: str) -> Review | None:
 
 
 def delete_review(conn: sqlite3.Connection, question_id: str) -> None:
-    conn.execute("DELETE FROM reviews WHERE question_id = ?", (question_id,))
-    conn.commit()
+    with _write(conn):
+        conn.execute("DELETE FROM reviews WHERE question_id = ?", (question_id,))
 
 
 # --- öğrenciler -------------------------------------------------------------
@@ -406,7 +465,8 @@ def _student(r: sqlite3.Row) -> Student:
 
 def load_students(conn: sqlite3.Connection, *, include_archived: bool = False) -> list[Student]:
     where = "" if include_archived else "WHERE archived = 0"
-    return [_student(r) for r in conn.execute(f"SELECT * FROM students {where} ORDER BY alias, id")]
+    rows = conn.execute(f"SELECT * FROM students {where} ORDER BY alias, rowid")
+    return [_student(r) for r in rows]
 
 
 def get_student(conn: sqlite3.Connection, student_id: str) -> Student | None:
@@ -417,12 +477,12 @@ def get_student(conn: sqlite3.Connection, student_id: str) -> Student | None:
 def assign_questions(
     conn: sqlite3.Connection, student_id: str, question_ids: Iterable[str], assigned_at: str
 ) -> None:
-    conn.executemany(
-        "INSERT OR IGNORE INTO student_questions (student_id, question_id, assigned_at) "
-        "VALUES (?, ?, ?)",
-        [(student_id, qid, assigned_at) for qid in question_ids],
-    )
-    conn.commit()
+    with _write(conn):
+        conn.executemany(
+            "INSERT OR IGNORE INTO student_questions (student_id, question_id, assigned_at) "
+            "VALUES (?, ?, ?)",
+            [(student_id, qid, assigned_at) for qid in question_ids],
+        )
 
 
 def load_student_question_ids(conn: sqlite3.Connection, student_id: str) -> set[str]:
@@ -472,10 +532,11 @@ def _exam(r: sqlite3.Row) -> Exam:
 
 def load_exams(conn: sqlite3.Connection, *, student_id: str | None = None) -> list[Exam]:
     if student_id is None:
-        rows = conn.execute("SELECT * FROM exams ORDER BY created_at DESC, id")
+        rows = conn.execute("SELECT * FROM exams ORDER BY created_at DESC, rowid DESC")
     else:
         rows = conn.execute(
-            "SELECT * FROM exams WHERE student_id = ? ORDER BY created_at DESC, id", (student_id,)
+            "SELECT * FROM exams WHERE student_id = ? ORDER BY created_at DESC, rowid DESC",
+            (student_id,),
         )
     return [_exam(r) for r in rows]
 
@@ -486,5 +547,5 @@ def get_exam(conn: sqlite3.Connection, exam_id: str) -> Exam | None:
 
 
 def delete_exam(conn: sqlite3.Connection, exam_id: str) -> None:
-    conn.execute("DELETE FROM exams WHERE id = ?", (exam_id,))
-    conn.commit()
+    with _write(conn):
+        conn.execute("DELETE FROM exams WHERE id = ?", (exam_id,))
