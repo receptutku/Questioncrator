@@ -279,6 +279,42 @@ def test_kotu_yanit_crashed_olur_ve_isci_yenilenir(surec_kipi, monkeypatch, govd
     assert Parameter("a", 1, 9).high == 9
 
 
+def test_sonuc_boyutu_varsayilani_4_mb(monkeypatch):
+    monkeypatch.delenv("QC_SANDBOX_MAX_RESULT_MB", raising=False)
+    assert sandbox._max_result_bytes() == 4 * 1024 * 1024
+
+
+def sahte_cerceve_yazar(sahte: object, sira_kaydir: int) -> str:
+    """Kendi yanıtından önce, tahmin ettiği sıra numarasıyla geçerli bir çerçeve yazar."""
+    from questioncrator import wire
+
+    govde = wire.dumps_ok(sahte, retire=False, seq=sandbox._WORKER_SEQ + sira_kaydir)
+    veri = memoryview(_cerceve(govde))
+    while veri:
+        veri = veri[os.write(sandbox._WORKER_FD, veri) :]
+    return "gercek"
+
+
+def test_yanlis_sira_numarali_cerceve_reddedilir(surec_kipi, monkeypatch):
+    monkeypatch.setenv("QC_SANDBOX_WORKERS", "1")
+    eski = sandbox.run(os.getpid, timeout=30)
+    with pytest.raises(sandbox.SandboxCrashed, match="sıra"):
+        sandbox.run(sahte_cerceve_yazar, "sahte", 1, timeout=30)
+    assert sandbox.run(os.getpid, timeout=30) != eski
+
+
+def test_iki_cerceve_yazan_isci_sonraki_ise_sizamaz(surec_kipi, monkeypatch):
+    monkeypatch.setenv("QC_SANDBOX_WORKERS", "1")
+    eski = sandbox.run(os.getpid, timeout=30)
+    # İlk çerçeve bu işin numarasını taşıdığı için kabul edilir (ayırt edilemez);
+    # ama arkada kalan gerçek çerçeve bir sonraki işe sonuç diye verilmemeli.
+    assert sandbox.run(sahte_cerceve_yazar, "sahte", 0, timeout=30) == "sahte"
+    with pytest.raises(sandbox.SandboxCrashed, match="sıra"):
+        sandbox.run(pow, 2, 2, timeout=30)
+    assert sandbox.run(os.getpid, timeout=30) != eski
+    assert sandbox.run(pow, 2, 3, timeout=30) == 8
+
+
 def test_ebeveynde_pickle_acma_yok():
     import inspect
 
@@ -311,7 +347,7 @@ def test_sonuc_boyut_siniri_iscide_uygulanir(surec_kipi, monkeypatch):
 def test_sonuc_boyut_siniri_ebeveynde_de_uygulanir(surec_kipi, monkeypatch):
     monkeypatch.setenv("QC_SANDBOX_WORKERS", "1")
     eski = sandbox.run(os.getpid, timeout=30)
-    # İşçi 16 MB sınırıyla açıldı; ebeveyn tarafını tek başına daraltıyoruz.
+    # İşçi 4 MB sınırıyla açıldı; ebeveyn tarafını tek başına daraltıyoruz.
     sandbox._pool().max_result_bytes = 64 * 1024
     with pytest.raises(sandbox.SandboxCrashed):
         sandbox.run(buyuk_metin_dondur, 256 * 1024, timeout=30)

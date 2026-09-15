@@ -9,16 +9,17 @@ DEĞİLDİR; o sınır reçete bekçileridir (`questioncrator.mathenv`). Bu tara
 CPU (süre sınırı + öldürme), bellek (Linux'ta `RLIMIT_AS`) ve aktarım
 güvenliği sağlar.
 
-Aktarım: Ebeveyn→işçi yönü pickle'dır (ebeveyn güvenilir taraftır).
-İşçi→ebeveyn yönünde pickle YOKTUR; işçi yanıtı güvenilmeyen bayt sayılır ve
-`questioncrator.wire` tür etiketli JSON kodeğiyle taşınır. Çerçeve 8 baytlık
-büyük uçlu uzunluk başlığı + gövdedir. Ebeveyn uzunluğu okumadan önce
-`QC_SANDBOX_MAX_RESULT_MB` sınırıyla denetler ve başlığı da gövdeyi de
-toplam süre içinde, seçici + `os.read` döngüsüyle okur; kısmi çerçeve
-yazıp bekleyen işçi zaman aşımıyla öldürülür. Aktarılamayan sonuç türü
-(sympy nesneleri dahil) işçide `SandboxCrashed("sonuç türü aktarılamaz:
-<modül.ad>")` olur ve işçi yenilenir; ebeveynin reddettiği yanıt da işçiyi
-yeniler.
+Aktarım: Ebeveyn→işçi yönü pickle'dır (ebeveyn güvenilir taraftır); her istek
+artan bir sıra numarası taşır. İşçi→ebeveyn yönünde pickle YOKTUR; işçi
+yanıtı güvenilmeyen bayt sayılır ve `questioncrator.wire` tür etiketli JSON
+kodeğiyle taşınır. Çerçeve 8 baytlık büyük uçlu uzunluk başlığı + gövdedir.
+Ebeveyn uzunluğu okumadan önce `QC_SANDBOX_MAX_RESULT_MB` sınırıyla denetler
+ve başlığı da gövdeyi de toplam süre içinde, seçici + `os.read` döngüsüyle
+okur; kısmi çerçeve yazıp bekleyen işçi zaman aşımıyla öldürülür. Yanıtın
+sıra numarası isteğinkiyle eşleşmezse (ör. işçi fazladan çerçeve yazdıysa)
+yanıt reddedilir. Aktarılamayan sonuç türü (sympy nesneleri dahil) işçide
+`SandboxCrashed("sonuç türü aktarılamaz: <modül.ad>")` olur; ebeveynin
+reddettiği yanıt da `SandboxCrashed` olur. İkisinde de işçi yenilenir.
 
 İşçiler `forkserver` bağlamıyla açılır; sunucu `sympy` ve
 `questioncrator.mathenv` modüllerini önceden yükler, böylece reçete
@@ -39,13 +40,14 @@ desteklemez.
 
 Ortam (havuz kurulurken bir kez okunur): `QC_SANDBOX` (`process` | `inline`),
 `QC_SANDBOX_WORKERS` (2), `QC_SANDBOX_MEMORY_MB` (1024),
-`QC_SANDBOX_MAX_RESULT_MB` (16).
+`QC_SANDBOX_MAX_RESULT_MB` (4).
 """
 
 from __future__ import annotations
 
 import atexit
 import importlib
+import itertools
 import multiprocessing
 import os
 import selectors
@@ -69,8 +71,10 @@ _READ_CHUNK = 1 << 20
 
 _POOL_LOCK = threading.Lock()
 _POOL: _Pool | None = None
-# Yalnız işçi süreçte dolu: yanıt çerçevelerinin yazıldığı kanal.
+# Yalnız işçi süreçte dolu: yanıt çerçevelerinin yazıldığı kanal ve geçerli
+# isteğin sıra numarası.
 _WORKER_FD: int | None = None
+_WORKER_SEQ: int = -1
 
 
 class SandboxTimeout(Exception):
@@ -94,7 +98,7 @@ def _memory_mb() -> int:
 
 
 def _max_result_bytes() -> int:
-    return max(1, int(os.environ.get("QC_SANDBOX_MAX_RESULT_MB", "16"))) * 1024 * 1024
+    return max(1, int(os.environ.get("QC_SANDBOX_MAX_RESULT_MB", "4"))) * 1024 * 1024
 
 
 def _context() -> Any:
@@ -150,22 +154,25 @@ def _lingering_threads() -> bool:
     return False
 
 
-def _encode_reply(status: str, value: Any, retire: bool, max_bytes: int) -> tuple[bytes, bool]:
+def _encode_reply(
+    status: str, value: Any, retire: bool, seq: int, max_bytes: int
+) -> tuple[bytes, bool]:
     """Yanıtı JSON çerçeve gövdesine çevirir; aktarılamayan sonuç işçiyi emekli eder."""
     try:
         if status == "ok":
-            data = wire.dumps_ok(value, retire=retire)
+            data = wire.dumps_ok(value, retire=retire, seq=seq)
         elif status == "err":
-            data = wire.dumps_error(value, retire=retire)
+            data = wire.dumps_error(value, retire=retire, seq=seq)
         else:
-            data = wire.dumps_crash(value, retire=retire)
+            data = wire.dumps_crash(value, retire=retire, seq=seq)
     except wire.WireError as exc:
-        return wire.dumps_crash(str(exc), retire=True), True
+        return wire.dumps_crash(str(exc), retire=True, seq=seq), True
     except Exception as exc:  # noqa: BLE001 — kodlayıcıda beklenmeyen hata
-        return wire.dumps_crash(f"sonuç aktarılamadı: {type(exc).__name__}", retire=True), True
+        message = f"sonuç aktarılamadı: {type(exc).__name__}"
+        return wire.dumps_crash(message, retire=True, seq=seq), True
     if len(data) > max_bytes:
         message = f"sonuç boyut sınırını aştı ({len(data)} > {max_bytes} bayt)"
-        return wire.dumps_crash(message, retire=True), True
+        return wire.dumps_crash(message, retire=True, seq=seq), True
     return data, retire
 
 
@@ -176,7 +183,7 @@ def _write_frame(fd: int, body: bytes) -> None:
 
 
 def _serve(conn: Any, memory_mb: int, max_bytes: int) -> None:
-    global _WORKER_FD
+    global _WORKER_FD, _WORKER_SEQ
     # Ayarlar ortamdan değil argümandan gelir: forkserver'dan doğan işçi,
     # ebeveynin güncel ortamını değil forkserver'ın ortamını görür.
     _limit_memory(memory_mb)
@@ -185,13 +192,14 @@ def _serve(conn: Any, memory_mb: int, max_bytes: int) -> None:
     _WORKER_FD = conn.fileno()
     while True:
         try:
-            fn, args, kwargs = conn.recv()  # güvenilir ebeveynin isteği
+            seq, fn, args, kwargs = conn.recv()  # güvenilir ebeveynin isteği
         except EOFError:
             return
         except Exception as exc:  # noqa: BLE001 — iş işçide açılamadı
-            data, _ = _encode_reply("crash", f"iş aktarılamadı: {exc}", True, max_bytes)
+            data, _ = _encode_reply("crash", f"iş aktarılamadı: {exc}", True, -1, max_bytes)
             _write_frame(_WORKER_FD, data)
             return
+        _WORKER_SEQ = seq
         retire = False
         try:
             status, value = "ok", fn(*args, **kwargs)
@@ -204,7 +212,7 @@ def _serve(conn: Any, memory_mb: int, max_bytes: int) -> None:
         # Emeklilik sonuçla birlikte bildirilir ki ebeveyn kapanan işçiye yeni
         # iş göndermesin.
         retire = retire or _lingering_threads()
-        data, retire = _encode_reply(status, value, retire, max_bytes)
+        data, retire = _encode_reply(status, value, retire, seq, max_bytes)
         del value
         _write_frame(_WORKER_FD, data)
         if retire:
@@ -301,6 +309,7 @@ class _Pool:
         self.memory_mb = _memory_mb()
         self.max_result_bytes = _max_result_bytes()
         self._cond = threading.Condition()
+        self._seq = itertools.count(1)
         self.closed = False
         self._idle: list[_Worker] = []
         self._busy: set[_Worker] = set()
@@ -309,6 +318,10 @@ class _Pool:
 
     def _spawn(self) -> _Worker:
         return _Worker(self.memory_mb, self.max_result_bytes)
+
+    def next_seq(self) -> int:
+        with self._cond:
+            return next(self._seq)
 
     def acquire(self, deadline: float) -> _Worker:
         with self._cond:
@@ -389,9 +402,10 @@ def run(fn: Callable[..., T], *args: Any, timeout: float, **kwargs: Any) -> T:
     try:
         if not worker.alive():
             worker = pool.replace(worker)
+        seq = pool.next_seq()
         # İş önce tümüyle pickle'lanır: aktarılamayan bir iş işçiye hiç ulaşmaz
         # ve istisnası (PicklingError vb.) olduğu gibi çağırana döner.
-        request = bytes(ForkingPickler.dumps((fn, args, kwargs)))
+        request = bytes(ForkingPickler.dumps((seq, fn, args, kwargs)))
         if time.monotonic() >= deadline:
             raise SandboxTimeout(f"iş {timeout} saniyede başlatılamadı")
         try:
@@ -416,7 +430,7 @@ def run(fn: Callable[..., T], *args: Any, timeout: float, **kwargs: Any) -> T:
             worker = pool.replace(worker)
             raise SandboxCrashed("değerlendirme süreci beklenmedik biçimde kapandı") from exc
         try:
-            status, value, retire = wire.loads_reply(raw)
+            status, value, retire = wire.loads_reply(raw, seq=seq)
         except wire.WireError as exc:
             # Reddedilen yanıt ya bir hata ya da ele geçirilmiş işçi demek;
             # ikisini ayırt edemeyiz. Yenilemek bir fork'a mal olur.
