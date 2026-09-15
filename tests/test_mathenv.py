@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import collections.abc as _abc
+import itertools as _it
 import pathlib
+import signal as _signal
 import subprocess
 import sys
 import time
 import types
+import warnings as _warnings
 
 import pytest
 import sympy
@@ -263,11 +267,25 @@ _KOK = pathlib.Path(__file__).resolve().parents[1]
 
 # Hocanın günlük olarak yazacağı reçeteler. Bunlar TAZE bir yorumlayıcıda
 # çalıştırılır: aynı süreçte koşmak hatayı maskeler, çünkü daha önceki bir
-# test tembel yüklenen sympy modüllerini çoktan içe aktarmış olabilir.
-TAZE_SUREC_RECETELERI = [
+# test tembel yüklenen sympy modüllerini çoktan içe aktarmış olabilir. Ayrıca
+# içerik tabanlı muhafız (F1) yalnız taze süreçte doğru sınanır: bir reçete bir
+# kez çalıştıktan sonra sympy'nin arama tabloları kurulur ve ikinci çalıştırma
+# hiçbir iç dizge ayrıştırmaz — hata kendini maskeler.
+TAZE_CALISMALI = [
+    # F1: körlemesine reddin kırdığı, tembel kurulan tablolara dayanan aile.
+    "integrate(exp(-x**2), (x, -oo, oo))",
+    "integrate(1/(x**2+1), (x, -oo, oo))",
+    "integrate(x*exp(-x), (x, 0, oo))",
+    "integrate(exp(-x)*sin(x), (x, 0, oo))",
+    "integrate(sin(x)/x, (x, 0, oo))",
+    "Integral(1/(x**2+1), (x, 0, oo)).doit()",
+    "summation(exp(-k), (k, 0, oo))",
+    "hyperexpand(hyper([], [1], x))",
+    "mellin_transform(exp(-x), x, s)",
+    "fourier_transform(exp(-x**2), x, k)",
+    # Günlük reçeteler.
     "simplify((x**2-1)/(x-1))",
     "diff(3*x**2+5*x-2, x)",
-    "integrate(sin(x), (x, 0, pi))",
     "limit(sin(3*x)/x, x, 0)",
     "Matrix([[2,1],[4,3]]).det()",
     "solve(x**2-4, x)",
@@ -287,27 +305,91 @@ TAZE_SUREC_RECETELERI = [
     "Matrix([[1,2],[3,4]]).inv()",
     "factorint(60)",
     "primerange(1, 20)",
+    "factorint(60).keys()",  # F5a: dict_keys (Iterable ama Iterator değil)
+    "factorint(60).items()",  # F5a: dict_items
+    "şık + 1",  # Türkçe tanımlayıcı
+    "μ + 1",  # Yunanca tanımlayıcı
+]
+
+# Bunlar taze süreçte de mutlaka `UnsafeExpression` ile reddedilmeli.
+_UZUN_RECETE = "x" * 2001
+TAZE_ENGELLENMELI = [
+    'sympify("x")',
+    'S("x")',
+    '"abc"',
+    "f'{x}'",
+    _RCE_PAYLOAD,  # round-1 birleştirme yükü
+    "nsolve(sin(x)-1, x, 1)",
+    "lambdify(x, x)",
+    "Function(x)",
+    "Symbol(x)",
+    "symbols(x)",
+    "x.\uff46unc(x.\uff4eame)",  # NFKC: ｆunc/ｎame
+    "\uff33ymbol(x)",  # NFKC: Ｓymbol
+    "\uff29f",  # NFKC: Ｉf
+    "\U0001d412ymbol(x)",  # matematiksel kalın S
+    "lambda: 1",
+    "[i for i in range(3)]",
+    "x.__class__",
+    "_x + 1",
+    "(y := 3)",
+    _UZUN_RECETE,
+    "1" + "0" * 12,  # 13 haneli
+    "continued_fraction_iterator(sqrt(2))",  # F4: temiz UnsafeExpression
+    "primerange(1, 100000)",  # üst sınır
+    # F2: str üreten adlar reddedilmeli.
+    "default_sort_key(x)",
+    "filldedent(x)",
+    "FU",
+    "capture(x)",
+    "poly_from_expr(x)",
+    "list2numpy(Matrix([[1]]))",
+    "TableForm(Matrix([[1]]))",
+    "Abs.lseries().gi_code",
+    "x.sort_key()",
+    "Eq(x, 1).rel_op",
 ]
 
 
-@pytest.mark.parametrize("recete", TAZE_SUREC_RECETELERI)
-def test_mesru_recete_taze_yorumlayicida_calisir(recete):
-    """Her meşru reçete KENDİ taze yorumlayıcısında çalışmalı.
-
-    Bu testin alt süreç kullanması şart: `simplify` gibi işlevler
-    değerlendirme sırasında tembel içe aktarma yapar ve içe aktarılan modülün
-    gövdesi sympy'ye kendi sabit metinlerini ayrıştırtır. Aynı süreçte önceki
-    bir test o modülü zaten yüklediyse yol hiç tetiklenmez ve kırık davranış
-    görünmez olur. Üretimdeki işçi de her zaman taze bir süreçtir.
-    """
-    kod = f"from questioncrator.mathenv import parse; parse({recete!r})"
-    sonuc = subprocess.run(
+def _taze_parse(recete: str) -> subprocess.CompletedProcess:
+    kod = (
+        "from questioncrator.mathenv import parse, UnsafeExpression\n"
+        "try:\n"
+        "    r = parse(" + repr(recete) + ")\n"
+        "    print('OK', repr(r))\n"
+        "except UnsafeExpression as e:\n"
+        "    print('BLOCKED', str(e))\n"
+    )
+    return subprocess.run(
         [sys.executable, "-c", kod],
         capture_output=True,
         text=True,
         cwd=str(_KOK),
     )
-    assert sonuc.returncode == 0, f"{recete!r} taze süreçte başarısız:\n{sonuc.stderr}"
+
+
+@pytest.mark.parametrize("recete", TAZE_CALISMALI)
+def test_mesru_recete_taze_yorumlayicida_calisir(recete):
+    """Her meşru reçete KENDİ taze yorumlayıcısında çalışmalı (returncode 0, OK)."""
+    sonuc = _taze_parse(recete)
+    assert sonuc.returncode == 0, f"{recete!r} taze süreçte çöktü:\n{sonuc.stderr}"
+    assert sonuc.stdout.startswith("OK"), (
+        f"{recete!r} taze süreçte engellendi:\n{sonuc.stdout}{sonuc.stderr}"
+    )
+
+
+@pytest.mark.parametrize("recete", TAZE_ENGELLENMELI)
+def test_tehlikeli_recete_taze_yorumlayicida_engellenir(recete):
+    """Her tehlikeli reçete KENDİ taze yorumlayıcısında `UnsafeExpression` almalı.
+
+    Beklenen sonuç sütunu (BLOCKED) açıkça sınanır: yalnız "çökmedi" yetmez,
+    kaçış gerçekten reddedilmiş olmalı.
+    """
+    sonuc = _taze_parse(recete)
+    assert sonuc.returncode == 0, f"{recete!r} beklenmedik biçimde çöktü:\n{sonuc.stderr}"
+    assert sonuc.stdout.startswith("BLOCKED"), (
+        f"{recete!r} engellenmedi (SIZINTI):\n{sonuc.stdout}{sonuc.stderr}"
+    )
 
 
 def test_nfkc_yazimi_yasaklari_atlatamaz():
@@ -354,3 +436,296 @@ def test_sinirsiz_uretec_tuketilmeden_reddedilir():
 
     with pytest.raises(mathenv.UnsafeExpression):
         mathenv._normalize(sonsuz())
+
+
+def test_dict_keys_ve_items_normallesir():
+    # F5a: `dict_keys`/`dict_items` `Iterable` ama `Iterator` değildir; yine de
+    # 1000 öğe sınırı altında kabul edilmeli.
+    anahtarlar = mathenv.parse("factorint(60).keys()")
+    assert isinstance(anahtarlar, sympy.Basic)
+    assert set(anahtarlar) == {2, 3, 5}
+    ogeler = mathenv.parse("factorint(60).items()")
+    assert isinstance(ogeler, sympy.Basic)
+
+
+# --- F1: içerik tabanlı ayrıştırma muhafızı --------------------------------
+
+
+def test_icerik_muhafizi_sympy_ic_sabitini_gecirir():
+    # sympy'nin kendi derleme-anı sabitleri (ör. '3/2') `check_recipe`ten geçer;
+    # bayrak açıkken bile ayrıştırılabilmeli. (Körlemesine red F1'i bozuyordu.)
+    jeton = mathenv._evaluating_recipe.set(True)
+    try:
+        assert mathenv._original_parse_expr("3/2") == sympy.Rational(3, 2)
+        # Muhafızlı takma ad üzerinden de:
+        assert sympy.parsing.sympy_parser.parse_expr("3/2") == sympy.Rational(3, 2)
+    finally:
+        mathenv._evaluating_recipe.reset(jeton)
+
+
+def test_icerik_muhafizi_guvensiz_dizgeyi_reddeder():
+    # Bayrak açıkken güvensiz bir dizgenin ikinci ayrıştırması reddedilmeli.
+    jeton = mathenv._evaluating_recipe.set(True)
+    try:
+        with pytest.raises(mathenv.UnsafeExpression):
+            sympy.sympify("__import__('os').getcwd()")
+        with pytest.raises(mathenv.UnsafeExpression):
+            sympy.sympify("srepr(x)")  # yasaklı ad
+    finally:
+        mathenv._evaluating_recipe.reset(jeton)
+
+
+def test_icerik_muhafizi_bayrak_disinda_calismaz():
+    # Bayrak kapalıyken uygulamanın kendi çağrıları normal ayrıştırır (muhafız
+    # hiç devreye girmez).
+    assert not mathenv._evaluating_recipe.get()
+    assert sympy.sympify("x + 1") == sympy.Symbol("x") + 1
+
+
+# --- F2: ad alanı str üretmez ----------------------------------------------
+
+
+def _kap_icinde_str(v, derinlik=0):
+    if isinstance(v, (str, bytes, bytearray)):
+        return True
+    if derinlik > 4 or isinstance(v, (sympy.Basic, sympy.matrices.MatrixBase)):
+        return False
+    if isinstance(v, _abc.Mapping):
+        return any(
+            _kap_icinde_str(a, derinlik + 1) or _kap_icinde_str(b, derinlik + 1)
+            for a, b in list(v.items())[:100]
+        )
+    if isinstance(v, (list, tuple, set, frozenset)):
+        return any(_kap_icinde_str(w, derinlik + 1) for w in list(v)[:100])
+    if isinstance(v, _abc.Iterator):
+        try:
+            return any(_kap_icinde_str(w, derinlik + 1) for w in _it.islice(v, 50))
+        except Exception:
+            return False
+    return False
+
+
+def _str_ureten_adlar():
+    """Ad alanındaki her adı zararsız argümanlarla çağırıp str/bytes döndüreni bulur."""
+    x, y, k = sympy.symbols("x y k")
+    M = sympy.Matrix([[1, 2], [3, 4]])
+    argumanlar = [
+        (),
+        (x,),
+        (x, x),
+        (x, y),
+        (1,),
+        (2, 3),
+        (x, 1),
+        (1, x),
+        (M,),
+        (M, M),
+        (x**2 + 1, x),
+        ([x, y],),
+        ((x, y),),
+        (sympy.Rational(1, 2),),
+        (x, (x, 0, 1)),
+        (sympy.Poly(x**2 - 1, x),),
+        ([1, 2, 3],),
+        (sympy.Eq(x, 1), x),
+        (sympy.sin(x),),
+        (sympy.pi,),
+        (sympy.Float(1.5),),
+        (x, x, x),
+        (1, 2, 3),
+        (sympy.Interval(0, 1),),
+        (sympy.FiniteSet(1, 2),),
+        (sympy.Tuple(1, 2),),
+        (sympy.Dict({1: 2}),),
+        (sympy.Function("f")(x), x),
+        (sympy.Function("f")(x),),
+        (2,),
+        (0,),
+        (-1,),
+        (sympy.oo,),
+        (sympy.I,),
+        (sympy.E,),
+        (k, (k, 1, 10)),
+    ]
+
+    def _alarm(*_):
+        raise TimeoutError
+
+    _signal.signal(_signal.SIGALRM, _alarm)
+
+    def guarded(fn, *a):
+        _signal.setitimer(_signal.ITIMER_REAL, 1.0)
+        try:
+            return fn(*a)
+        finally:
+            _signal.setitimer(_signal.ITIMER_REAL, 0)
+
+    bulunan = set()
+    with _warnings.catch_warnings():
+        _warnings.simplefilter("ignore")
+        for ad, nesne in mathenv._base_namespace().items():
+            if _kap_icinde_str(nesne):
+                bulunan.add(ad)
+                continue
+            if callable(nesne):
+                for a in argumanlar:
+                    try:
+                        r = guarded(nesne, *a)
+                    except BaseException:
+                        continue
+                    if _kap_icinde_str(r):
+                        bulunan.add(ad)
+                        break
+    return bulunan
+
+
+def test_recete_ad_alani_metin_uretmez():
+    """F2: reçete ad alanındaki hiçbir ad çalışma anında str/bytes üretememeli.
+
+    Bu tarama mekaniktir: 842 adın her biri zararsız argümanlarla çağrılır ve
+    dönüşü (kap içinde de olsa) str/bytes içeriyorsa hata verir. Bulunan tüm
+    adlar `DENIED_NAMES`e eklendiği için küme boş olmalı. (SIGALRM ana iş
+    parçacığı gerektirir; pytest testleri ana iş parçacığında koşar.)
+    """
+    kalan = _str_ureten_adlar()
+    assert kalan == set(), f"str üreten erişilebilir adlar kaldı: {sorted(kalan)}"
+
+
+def test_pretty_yasakli_ve_metin_dondurur():
+    # Brief'in özellikle işaret ettiği ad: `pretty` gerçekten str döndürür ve
+    # yasak listesinde olmalı.
+    assert "pretty" in mathenv.DENIED_NAMES
+    assert isinstance(sympy.pretty(sympy.Symbol("x")), str)
+
+
+def test_derin_nitelik_zinciri_str_yollari_kapali():
+    # F2 (ek): precise erişilebilirlik taramasında bulunan derin str yolları
+    # chokepoint jetonlarıyla kapatıldı.
+    for recete in [
+        "Abs.lseries().gi_code",  # üreteç kod nesnesi -> co_*
+        "list2numpy(Matrix([[1]]))",  # numpy dizisi -> dtype.char, tobytes
+        "Eq(x, 1).rel_op",  # '==' dizgesi
+        "x.sort_key()",  # sıralama anahtarı (iç içe str)
+    ]:
+        with pytest.raises(mathenv.UnsafeExpression):
+            mathenv.parse(recete)
+
+
+# --- F3: bayrak, normalleştirme bittikten SONRA sıfırlanır -------------------
+
+
+def test_uretec_govdesi_bayrak_acikken_calisir():
+    """F3: `_normalize` üreteç gövdesini gerçekleştirirken bayrak hâlâ açık olmalı.
+
+    Eski kodda `parse` bayrağı `finally`de `_normalize`ten ÖNCE sıfırlıyordu;
+    üreteç gövdesi (islice ile 1001 öğeye dek) her iki muhafız kapalıyken
+    çalışıyordu. Tel-tuzak bir yineleyici, tüketilirken bayrağın değerini kaydeder.
+    """
+    kayit = []
+
+    class TripwireIterator:
+        def __init__(self):
+            self._n = 0
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            kayit.append(mathenv._evaluating_recipe.get())
+            self._n += 1
+            if self._n > 3:
+                raise StopIteration
+            return sympy.Integer(self._n)
+
+    # `parse`i taklit et: bayrağı ayarla, sonra `_normalize` çağır.
+    jeton = mathenv._evaluating_recipe.set(True)
+    try:
+        sonuc = mathenv._normalize(TripwireIterator())
+    finally:
+        mathenv._evaluating_recipe.reset(jeton)
+    assert kayit, "yineleyici hiç tüketilmedi"
+    assert all(kayit), "üreteç gövdesi bayrak KAPALIYKEN çalıştı (F3 gerilemesi)"
+    assert list(sonuc) == [1, 2, 3]
+
+
+# --- F4: kap gerçekleştirmesinde istisna sızıntısı yok ----------------------
+
+
+def test_continued_fraction_temiz_unsafe_yukseltir():
+    # F4: eski davranış ~1.3 sn sonra çıplak `RecursionError` idi; artık temiz
+    # `UnsafeExpression`.
+    with pytest.raises(mathenv.UnsafeExpression):
+        mathenv.parse("continued_fraction_iterator(sqrt(2))")
+
+
+def test_normalize_kap_gerceklestirme_hatasini_sarar():
+    def patlayan():
+        yield sympy.Integer(1)
+        raise RuntimeError("boom")
+
+    with pytest.raises(mathenv.UnsafeExpression) as bilgi:
+        mathenv._normalize(patlayan())
+    assert "reçete sonucu üretilirken hata" in str(bilgi.value)
+
+
+def test_parse_recursionerror_disari_sizmaz(monkeypatch):
+    # F4: `RecursionError` `parse` içinde herhangi bir aşamada oluşursa ham
+    # biçimde dışarı sızmamalı; `parse`ın en dış yakalayıcısı onu temiz bir
+    # `UnsafeExpression`e çevirir. Burada normalleştirme aşamasını `RecursionError`
+    # yükseltecek biçimde değiştiriyoruz.
+    def patlayan_normalize(_value):
+        raise RecursionError("maximum recursion depth exceeded")
+
+    monkeypatch.setattr(mathenv, "_normalize", patlayan_normalize)
+    with pytest.raises(mathenv.UnsafeExpression):
+        mathenv.parse("x + 1")
+
+
+# --- F5b: parse muhafızı kimlik-eksiksiz ------------------------------------
+
+
+def test_parse_muhafizi_tum_takma_adlarda_kurulu():
+    # Eski kod yalnız `sympy_parser.parse_expr`i sarıyordu; `sympy.parse_expr`
+    # ve `sympy.parsing.parse_expr` muhafızsız kalıyordu.
+    import sympy.parsing
+
+    assert getattr(sympy.parsing.sympy_parser.parse_expr, "_qc_guard", False)
+    assert getattr(sympy.parse_expr, "_qc_guard", False)
+    assert getattr(sympy.parsing.parse_expr, "_qc_guard", False)
+    # Yüklü hiçbir sympy modülünde sarmalanmamış özgün başvuru kalmamalı.
+    import sys as _sys
+
+    kalan = [
+        (m.__name__, ad)
+        for m in list(_sys.modules.values())
+        if m is not None and getattr(m, "__name__", "").startswith("sympy")
+        for ad, deger in list(vars(m).items())
+        if deger is mathenv._original_parse_expr
+    ]
+    assert kalan == [], f"muhafızsız parse_expr takma adları: {kalan}"
+
+
+# --- İçerik muhafızına karşı özel olarak tasarlanmış yeni yük ----------------
+
+
+def test_icerik_muhafizina_karsi_yeni_yuk_basarisiz():
+    """Yeni yük: çalışma anında `check_recipe`ten geçecek bir dizge kurup yine de
+    tehlikeli olmayı dener.
+
+    Fikir: `chr`/`bin`/`ord` yasak değildir ve sympy'nin KENDİ ayrıştırma
+    ad alanında gerçek yerleşiktir; `chr(95)+chr(95)+...` ile alt çizgi/dizge
+    kurulup `__import__` inşa edilebilirdi. Neden başarısız:
+      (1) Reçete ad alanında `__builtins__ = {}` olduğundan `chr`/`bin`/`ord`
+          bu adlar arasında yoktur; `auto_symbol` onları SEMBOLİK bir çağrıya
+          çevirir (gerçek dizge üretmez).
+      (2) İçerik muhafızı yalnız sympy'nin KENDİ derleme-anı sabitlerini görür;
+          saldırgan bir dizgeyi bir iç ayrıştırmaya enjekte edecek erişilebilir
+          bir sink yoktur (str üreten adların hepsi yasak, str sonuç `_normalize`
+          kapısında reddedilir).
+    Sonuç: RCE yok; hiçbir dizge gerçek Python str'ine dönüşmez.
+    """
+    for yuk in ["chr(95)+chr(95)", "bin(3)+bin(3)", "ord(x)*chr(95)"]:
+        sonuc = mathenv.parse(yuk)
+        assert isinstance(sonuc, sympy.Basic)
+        # Sembolik kaldı: gerçek str üretilmedi.
+        assert not isinstance(sonuc, (str, bytes))

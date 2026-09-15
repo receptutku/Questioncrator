@@ -73,6 +73,24 @@ DENIED_NAMES = frozenset(
         "Function", "Symbol", "Dummy", "Wild", "symbols", "nsolve",
         "autowrap", "ufuncify", "binary_function", "codegen",
         "implemented_function",
+        # F2 (ek önlem): reçete ad alanı taranarak (bkz.
+        # tests/test_mathenv.py::test_recete_ad_alani_metin_uretmez) çalışma
+        # anında Python `str`/`bytes` döndüren adların tümü bulundu ve buraya
+        # eklendi. `_normalize`in str/bytes kapısı yine de son emniyet kemeri;
+        # bu liste dizgenin ilk elde edilmesini de engeller.
+        # (1) Doğrudan ya da kap içinde str döndüren üst düzey adlar:
+        "FU", "capture", "timed", "default_sort_key", "filldedent",
+        "poly_from_expr", "parallel_poly_from_expr",
+        # (2) str taşıyan yabancı nesneleri (numpy dizisi, yazıcı, tablo)
+        # üreten üst düzey adlar — alt ağacı kökten keser:
+        "list2numpy", "matrix2numpy", "TableForm", "StrPrinter",
+        # (3) str döndüren nitelik zinciri jetonları (chokepoint):
+        # üreteç kod nesnesi, mpmath bağlamı, tanım nesnesi iç gösterimi,
+        # sıralama/karşılaştırma anahtarları, yazıcı/tablo yöntemleri.
+        "gi_code", "context", "rep", "alias", "fmt", "default_order",
+        "rel_op", "sort_key", "class_key", "cache_parameters", "rules",
+        "as_latex", "as_str", "table", "doprint", "emptyPrinter",
+        "printmethod",
     }
 )  # fmt: skip
 DENIED_PREFIXES = ("_", "plot", "print_", "pprint")
@@ -181,29 +199,83 @@ def _in_module_import() -> bool:
     return False
 
 
+@functools.lru_cache(maxsize=4096)
+def _recipe_content_ok(text: str) -> bool:
+    """İçerik muhafızı için: dizge, reçete dilinin kurallarına uyuyor mu?
+
+    `check_recipe` ile aynı kuralları uygular (dizge/f-string yok, alt çizgi
+    yok, yasaklı ad yok, `__`/`import` alt dizgesi yok). Sonuç önbelleğe alınır:
+    değerlendirme sırasında aynı iç sabit birçok kez ayrıştırılabilir; kural
+    kümesi çalışma anında sabit olduğundan önbellek güvenlidir.
+    """
+    if "__" in text or "import" in text:
+        return False
+    try:
+        check_recipe(text)
+    except UnsafeExpression:
+        return False
+    return True
+
+
 # Not: `functools.wraps` kullanmıyoruz — sarmalanan özgün işleve `__wrapped__`
 # üzerinden muhafızsız bir tutamak bırakırdı.
 def _guarded_parse_expr(*args: object, **kwargs: object) -> object:
-    """`sympy.parsing.sympy_parser.parse_expr` yerine geçen muhafız.
+    """`sympy.parsing.sympy_parser.parse_expr` yerine geçen içerik muhafızı.
 
     Reçete değerlendirilirken sympy'nin herhangi bir dolaylı yolu (örn.
     `sympify(<dizge>)` ya da `simplify(<dizge>)`) bir dizgeyi yeniden
-    ayrıştırmaya kalkarsa, o ikinci eval'ı burada durdururuz. Kendi
-    `parse`imiz özgün başvuruyu (`_original_parse_expr`) doğrudan çağırır.
+    ayrıştırmaya kalkarsa, o dizge REÇETE DİLİNİN KENDİ kurallarından
+    (`check_recipe`) geçirilir: geçerse özgün ayrıştırıcı devreder, geçmezse
+    `UnsafeExpression` yükselir.
 
-    Tek muafiyet: sürmekte olan bir modül içe aktarma (bkz. `_in_module_import`).
+    Gerekçe: sympy kendi arama tablolarını çalışma anında tembel kurarken
+    KENDİ derleme-anı metin sabitlerini (ör. `'3/2'`, `'x'`, `'Number'`) sympify
+    eder; bunlar düz matematiktir ve `check_recipe`ten geçer. Bir saldırgan yükü
+    ise tırnak, `__`, alt çizgiyle başlayan ad ya da yasaklı ad içermeden
+    tehlikeli bir sink'e ulaşamaz; bunların hepsi `check_recipe`te reddedilir.
+    Böylece eski körlemesine reddin kırdığı meşru reçete ailesi (tembel kurulan
+    arama tablolarına dayanan hesaplar) yeniden çalışırken ikinci-eval kapısı
+    kapalı kalır.
+
+    Ek muafiyet: sürmekte olan bir modül içe aktarma (bkz. `_in_module_import`).
+    Kendi `parse`imiz özgün başvuruyu (`_original_parse_expr`) doğrudan çağırdığı
+    için üst düzey reçetenin kendisi bu muhafızdan geçmez (çift tokenizasyon yok).
     """
-    if _evaluating_recipe.get() and not _in_module_import():
-        raise UnsafeExpression("reçete değerlendirilirken dizge ayrıştırma reddedildi")
+    if _evaluating_recipe.get():
+        text = args[0] if args else kwargs.get("s")
+        if isinstance(text, str) and not _recipe_content_ok(text) and not _in_module_import():
+            raise UnsafeExpression("reçete değerlendirilirken güvensiz dizge ayrıştırma reddedildi")
     return _original_parse_expr(*args, **kwargs)
 
 
+_guarded_parse_expr._qc_guard = True  # type: ignore[attr-defined]
+_guarded_parse_expr._qc_original = _original_parse_expr  # type: ignore[attr-defined]
+
+
 def _install_parse_guard() -> None:
-    """Muhafızı bir kez, yeniden çalıştırmaya dayanıklı biçimde kurar."""
+    """`parse_expr`in tüm sympy bağlarını kimlik üzerinden muhafızla değiştirir.
+
+    `lambdify` kurucusuyla aynı yöntem: sabit bir ad listesi yerine yüklü tüm
+    sympy modüllerinde nesne kimliği (`is _original_parse_expr`) eşleşen her adı
+    değiştiririz. Böylece `sympy.parse_expr` ve `sympy.parsing.parse_expr` gibi
+    takma adlar da muhafızlanır; yalnız `sympy_parser.parse_expr` niteliğini
+    değiştirmek bu iki takma adı muhafızsız bırakıyordu (F5b).
+    """
     if getattr(_sympy_parser.parse_expr, "_qc_guard", False):
         return
-    _guarded_parse_expr._qc_guard = True  # type: ignore[attr-defined]
-    _sympy_parser.parse_expr = _guarded_parse_expr
+    for module in list(sys.modules.values()):
+        if module is None or not getattr(module, "__name__", "").startswith("sympy"):
+            continue
+        try:
+            members = list(vars(module).items())
+        except TypeError:
+            continue
+        for attribute, value in members:
+            if value is _original_parse_expr:
+                try:
+                    setattr(module, attribute, _guarded_parse_expr)
+                except (AttributeError, TypeError):
+                    pass
 
 
 _install_parse_guard()
@@ -289,6 +361,23 @@ def _warm_lazy_importers() -> None:
 _warm_lazy_importers()
 
 
+def _guard_materialization(thunk):
+    """Bir kap/üreteç gövdesini üretirken çıkan hatayı `UnsafeExpression`e sarar.
+
+    Kap ya da üreteç gövdesinin gerçekleştirilmesi (öğelerin tüketilmesi) rasgele
+    sympy kodu çalıştırır ve bu kod `RecursionError` gibi çıplak bir istisna
+    yükseltebilir (ör. `continued_fraction_iterator(sqrt(2))`). Böyle bir hata ham
+    biçimde dışarı sızmamalı; temiz bir `UnsafeExpression`e çevrilir (F4). Zaten
+    `UnsafeExpression` olanlar (uzunluk sınırı, metin kapısı) olduğu gibi geçer.
+    """
+    try:
+        return thunk()
+    except UnsafeExpression:
+        raise
+    except Exception as exc:  # RecursionError dâhil her şey
+        raise UnsafeExpression(f"reçete sonucu üretilirken hata: {exc}") from exc
+
+
 def _normalize(value: object) -> sympy.Basic:
     """SymPy'nin Basic olmayan dönüşlerini Basic'e çevirir.
 
@@ -302,21 +391,32 @@ def _normalize(value: object) -> sympy.Basic:
         raise UnsafeExpression("reçete metin değeri üretemez")
     if isinstance(value, sympy.matrices.MatrixBase):
         return sympy.ImmutableMatrix(value)
-    if isinstance(value, dict):
-        # Çarpanlara ayırma gibi çağrılar sözlük döndürür.
-        return sympy.Dict({_normalize(k): _normalize(v) for k, v in value.items()})
-    if isinstance(value, (list, tuple, set, frozenset)):
-        return sympy.Tuple(*[_normalize(v) for v in value])
     if isinstance(value, sympy.Basic):
         return value
     if isinstance(value, (bool, int, float, complex)):
         return sympy.sympify(value)
-    if isinstance(value, (range, collections.abc.Iterator)):
-        # Üreteç sonsuz olabilir; asla tüketerek bitirmeye çalışmayız.
-        items = list(itertools.islice(value, MAX_RESULT_ITEMS + 1))
-        if len(items) > MAX_RESULT_ITEMS:
-            raise UnsafeExpression("reçete çok uzun bir sonuç üretti")
-        return sympy.Tuple(*[_normalize(v) for v in items])
+    if isinstance(value, collections.abc.Mapping):
+        # Çarpanlara ayırma gibi çağrılar sözlük döndürür.
+        return _guard_materialization(
+            lambda: sympy.Dict({_normalize(k): _normalize(v) for k, v in value.items()})
+        )
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return _guard_materialization(lambda: sympy.Tuple(*[_normalize(v) for v in value]))
+    # Üreteç/menzil ve diğer yinelenebilirler (ör. `dict_keys`/`dict_items`:
+    # `Iterable` ama `Iterator` değil — F5a). str/bytes yukarıda, `Basic` ve
+    # `Matrix` de yukarıda ele alındığı için burada güvenle yakalanırlar.
+    if isinstance(value, (range, collections.abc.Iterator)) or isinstance(
+        value, collections.abc.Iterable
+    ):
+
+        def _build() -> sympy.Basic:
+            # Üreteç sonsuz olabilir; asla tüketerek bitirmeye çalışmayız.
+            items = list(itertools.islice(iter(value), MAX_RESULT_ITEMS + 1))
+            if len(items) > MAX_RESULT_ITEMS:
+                raise UnsafeExpression("reçete çok uzun bir sonuç üretti")
+            return sympy.Tuple(*[_normalize(v) for v in items])
+
+        return _guard_materialization(_build)
     raise UnsafeExpression("reçete beklenmeyen bir değer türü üretti")
 
 
@@ -340,9 +440,19 @@ def parse(recipe: str) -> sympy.Basic:
             global_dict=_allowed_namespace(),
             transformations=standard_transformations,
         )
+        # Normalleştirme, bayrak HÂLÂ açıkken yapılır (F3): `_normalize` üreteç
+        # ve kap gövdelerini burada gerçekleştirir ve o gövdeler çalışırken
+        # hem içerik hem de kod-üretimi muhafızları etkin kalmalıdır. Bayrağı
+        # normalleştirmeden önce sıfırlamak her iki muhafızı da devre dışı
+        # bırakırdı.
+        return _normalize(result)
+    except UnsafeExpression:
+        raise
+    except RecursionError as exc:
+        # `RecursionError` hiçbir yoldan ham biçimde dışarı sızmamalı (F4).
+        raise UnsafeExpression("reçete değerlendirilirken özyineleme sınırı aşıldı") from exc
     finally:
         _evaluating_recipe.reset(token)
-    return _normalize(result)
 
 
 def parse_with_timeout(recipe: str, seconds: float = 5.0) -> sympy.Basic:
