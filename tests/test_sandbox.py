@@ -315,6 +315,41 @@ def test_iki_cerceve_yazan_isci_sonraki_ise_sizamaz(surec_kipi, monkeypatch):
     assert sandbox.run(pow, 2, 3, timeout=30) == 8
 
 
+def sahte_yanit_yazip_uyu() -> None:
+    """Geçerli sıra numarasıyla sahte yanıt yazar, sonra `recv` etmeden uyur."""
+    from questioncrator import wire
+
+    govde = wire.dumps_ok("sahte", retire=False, seq=sandbox._WORKER_SEQ)
+    veri = memoryview(_cerceve(govde))
+    while veri:
+        veri = veri[os.write(sandbox._WORKER_FD, veri) :]
+    time.sleep(30)
+
+
+def test_okumayan_isciye_gonderim_suresiz_bloklamaz(surec_kipi, monkeypatch):
+    monkeypatch.setenv("QC_SANDBOX_WORKERS", "1")
+    # İşçi yanıt vermiş gibi görünür ve havuza döner, ama istek okumuyor.
+    assert sandbox.run(sahte_yanit_yazip_uyu, timeout=30) == "sahte"
+    # Soket tamponundan (macOS 8 KB, Linux ~200 KB) çok büyük istek.
+    baslangic = time.monotonic()
+    with pytest.raises(sandbox.SandboxTimeout):
+        sandbox.run(len, b"x" * (1024 * 1024), timeout=1.0)
+    assert time.monotonic() - baslangic < 3
+    assert sandbox.run(pow, 2, 5, timeout=30) == 32
+    assert sandbox.run(len, b"x" * (1024 * 1024), timeout=30) == 1024 * 1024
+
+
+def isci_kanali_bloklayici_mi() -> bool:
+    return os.get_blocking(sandbox._WORKER_FD)
+
+
+def test_bloklamasiz_kip_yalniz_ebeveyn_ucunda(surec_kipi, monkeypatch):
+    monkeypatch.setenv("QC_SANDBOX_WORKERS", "1")
+    assert sandbox.run(isci_kanali_bloklayici_mi, timeout=30) is True
+    (isci,) = sandbox._pool()._idle
+    assert os.get_blocking(isci.conn.fileno()) is False
+
+
 def test_ebeveynde_pickle_acma_yok():
     import inspect
 
@@ -464,10 +499,11 @@ def test_bellek_kaldiraci_iscide_sinirlanir(surec_kipi, monkeypatch, recete):
     monkeypatch.setenv("QC_SANDBOX_WORKERS", "1")
     monkeypatch.setenv("QC_SANDBOX_MEMORY_MB", LINUX_TEST_BELLEK_MB)
     eski = sandbox.run(os.getpid, timeout=30)
-    # MemoryError ham gelebilir ya da mathenv onu UnsafeExpression'a sarar; ikinci
-    # durumda MemoryError kökenini işçinin yenilenmesi (pid değişimi) kanıtlar:
-    # sandbox yalnız MemoryError zinciri taşıyan hatada işçiyi emekli eder.
-    with pytest.raises((MemoryError, UnsafeExpression, sandbox.SandboxCrashed)):
+    # Ham MemoryError ebeveynde SandboxCrashed olur ya da mathenv onu
+    # UnsafeExpression'a sarar; ikinci durumda MemoryError kökenini işçinin
+    # yenilenmesi (pid değişimi) kanıtlar: sandbox yalnız MemoryError zinciri
+    # taşıyan hatada işçiyi emekli eder.
+    with pytest.raises((UnsafeExpression, sandbox.SandboxCrashed)):
         sandbox.run(bellek_kaldiraci_dener, recete, timeout=60)
     assert sandbox.run(os.getpid, timeout=30) != eski
     assert sandbox.run(guvensiz_recete_dener, "diff(3*x**2, x)", timeout=30) == "ISTISNA_YOK"
@@ -498,4 +534,21 @@ def test_bellek_hatasi_zinciri_isciyi_yeniler(surec_kipi, monkeypatch):
     eski = sandbox.run(os.getpid, timeout=30)
     with pytest.raises(UnsafeExpression):
         sandbox.run(bellek_hatasi_zinciri_firlat, timeout=30)
+    assert sandbox.run(os.getpid, timeout=30) != eski
+
+
+def ham_hata_firlat(tur: str) -> None:
+    raise {"bellek": MemoryError, "ozyineleme": RecursionError}[tur]("isci sinirda")
+
+
+@pytest.mark.parametrize("tur", ["bellek", "ozyineleme"])
+def test_bellek_ve_ozyineleme_hatasi_ebeveyne_ham_gelmez(surec_kipi, monkeypatch, tur):
+    monkeypatch.setenv("QC_SANDBOX_WORKERS", "1")
+    eski = sandbox.run(os.getpid, timeout=30)
+    with pytest.raises(sandbox.SandboxCrashed) as bilgi:
+        sandbox.run(ham_hata_firlat, tur, timeout=30)
+    assert str(bilgi.value) == (
+        "değerlendirme bellek/özyineleme sınırına takıldı: isci sinirda"
+    )
+    assert not isinstance(bilgi.value, (MemoryError, RecursionError))
     assert sandbox.run(os.getpid, timeout=30) != eski

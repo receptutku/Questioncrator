@@ -99,24 +99,16 @@ def model_names() -> list[str]:
 
 # --- İstisna kaydı -------------------------------------------------------
 
-_Builder = Callable[[str], BaseException]
-_EXCEPTIONS: dict[str, tuple[type, _Builder | None]] = {}
+_EXCEPTIONS: dict[str, type] = {}
 
 
-def register_exception(cls: type, from_message: _Builder | None = None) -> None:
-    """Ebeveynde yeniden yükseltilebilecek bir istisna sınıfı ekler.
-
-    Kurucusu tek metin argüman almayan sınıflar için `from_message` verilir.
-    """
+def register_exception(cls: type) -> None:
+    """Ebeveynde tek metin argümanla yeniden kurulabilecek bir istisna sınıfı ekler."""
     if not (isinstance(cls, type) and issubclass(cls, Exception)):
         raise TypeError("yalnız Exception alt sınıfları kaydedilebilir")
     if issubclass(cls, (StopIteration, StopAsyncIteration)):
         raise TypeError("yineleme durdurma istisnaları kaydedilemez")
-    _EXCEPTIONS[_qualified(cls)] = (cls, from_message)
-
-
-def unregister_exception(cls: type) -> None:
-    _EXCEPTIONS.pop(_qualified(cls), None)
+    _EXCEPTIONS[_qualified(cls)] = cls
 
 
 for _exc in (
@@ -319,12 +311,11 @@ def _decode_model(payload: Any, level: int, budget: _Budget) -> Any:
 
 
 def _build_exception(name: str, message: str) -> BaseException | None:
-    entry = _EXCEPTIONS.get(name)
-    if entry is None:
+    cls = _EXCEPTIONS.get(name)
+    if cls is None:
         return None
-    cls, from_message = entry
     try:
-        exc = from_message(message) if from_message is not None else cls(message)
+        exc = cls(message)
     except Exception:  # noqa: BLE001 — kurulamayan istisna çöküşe düşer
         return None
     return exc if type(exc) is cls else None

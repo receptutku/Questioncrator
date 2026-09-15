@@ -17,7 +17,11 @@ Ebeveyn uzunluğu okumadan önce `QC_SANDBOX_MAX_RESULT_MB` sınırıyla denetle
 ve başlığı da gövdeyi de toplam süre içinde, seçici + `os.read` döngüsüyle
 okur; kısmi çerçeve yazıp bekleyen işçi zaman aşımıyla öldürülür. Yanıtın
 sıra numarası isteğinkiyle eşleşmezse (ör. işçi fazladan çerçeve yazdıysa)
-yanıt reddedilir. Aktarılamayan sonuç türü (sympy nesneleri dahil) işçide
+yanıt reddedilir. İstek de aynı toplam süre içinde, bloklamasız ebeveyn
+fd'sine seçici + `os.write` döngüsüyle yazılır (`send_bytes` çerçevesi);
+okumayan işçi zaman aşımıyla öldürülür. İşçiden gelen `MemoryError` ve
+`RecursionError` ebeveynde `SandboxCrashed` olur, işçi yenilenir.
+Aktarılamayan sonuç türü (sympy nesneleri dahil) işçide
 `SandboxCrashed("sonuç türü aktarılamaz: <modül.ad>")` olur; ebeveynin
 reddettiği yanıt da `SandboxCrashed` olur. İkisinde de işçi yenilenir.
 
@@ -226,8 +230,40 @@ class _ReadTimeout(Exception):
     pass
 
 
+class _WriteTimeout(Exception):
+    pass
+
+
 class _FrameTooLarge(Exception):
     pass
+
+
+def _send_request(fd: int, data: bytes, deadline: float) -> None:
+    """İsteği `Connection.send_bytes` çerçevesiyle toplam süre içinde yazar.
+
+    Çerçeve: 4 bayt işaretli büyük uçlu uzunluk (2 GiB üstünde -1 + 8 bayt);
+    işçi `Connection.recv` ile okumaya devam eder. Ebeveyn fd'si bloklamasızdır;
+    okumayan işçiye büyük istek süresiz bekletmez. Kısmen gönderilmiş istek
+    kanalı bozar; çağıran işçiyi yeniler.
+    """
+    size = len(data)
+    if size > 0x7FFFFFFF:
+        header = (-1).to_bytes(4, "big", signed=True) + size.to_bytes(8, "big")
+    else:
+        header = size.to_bytes(4, "big", signed=True)
+    with selectors.DefaultSelector() as selector:
+        selector.register(fd, selectors.EVENT_WRITE)
+        for view in (memoryview(header), memoryview(data)):
+            while view:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise _WriteTimeout
+                if not selector.select(remaining):
+                    continue
+                try:
+                    view = view[os.write(fd, view) :]
+                except BlockingIOError:
+                    continue
 
 
 def _read_frame(fd: int, max_bytes: int, deadline: float) -> bytes:
@@ -247,7 +283,10 @@ def _read_frame(fd: int, max_bytes: int, deadline: float) -> bytes:
                     raise _ReadTimeout
                 if not selector.select(remaining):
                     continue
-                chunk = os.read(fd, min(size - len(buffer), _READ_CHUNK))
+                try:
+                    chunk = os.read(fd, min(size - len(buffer), _READ_CHUNK))
+                except BlockingIOError:
+                    continue
                 if not chunk:
                     raise EOFError
                 buffer += chunk
@@ -270,6 +309,9 @@ class _Worker:
         )
         self.process.start()
         child.close()
+        # Yalnız ebeveyn ucu: soket çiftinin iki ucu ayrı açık dosya
+        # tanımıdır, işçinin ucu bloklayıcı kalır.
+        os.set_blocking(self.conn.fileno(), False)
 
     def alive(self) -> bool:
         with self._lock:
@@ -409,14 +451,18 @@ def run(fn: Callable[..., T], *args: Any, timeout: float, **kwargs: Any) -> T:
         if time.monotonic() >= deadline:
             raise SandboxTimeout(f"iş {timeout} saniyede başlatılamadı")
         try:
-            worker.conn.send_bytes(request)
-        except OSError:
-            worker = pool.replace(worker)
             try:
-                worker.conn.send_bytes(request)
-            except OSError as exc:
+                _send_request(worker.conn.fileno(), request, deadline)
+            except OSError:
                 worker = pool.replace(worker)
-                raise SandboxCrashed("iş değerlendirme sürecine gönderilemedi") from exc
+                try:
+                    _send_request(worker.conn.fileno(), request, deadline)
+                except OSError as exc:
+                    worker = pool.replace(worker)
+                    raise SandboxCrashed("iş değerlendirme sürecine gönderilemedi") from exc
+        except _WriteTimeout:
+            worker = pool.replace(worker)
+            raise SandboxTimeout(f"iş {timeout} saniyede gönderilemedi") from None
 
         try:
             raw = _read_frame(worker.conn.fileno(), pool.max_result_bytes, deadline)
@@ -436,7 +482,9 @@ def run(fn: Callable[..., T], *args: Any, timeout: float, **kwargs: Any) -> T:
             # ikisini ayırt edemeyiz. Yenilemek bir fork'a mal olur.
             worker = pool.replace(worker)
             raise SandboxCrashed(f"işçi yanıtı reddedildi: {exc}") from None
-        if retire:
+        # İşçinin bellek/özyineleme hatası ebeveynin kendi hatasıyla karışmasın.
+        limit_hit = status == "err" and isinstance(value, (MemoryError, RecursionError))
+        if retire or limit_hit:
             try:
                 worker = pool.replace(worker)
             except SandboxCrashed:
@@ -447,6 +495,10 @@ def run(fn: Callable[..., T], *args: Any, timeout: float, **kwargs: Any) -> T:
             return value
         if status == "crash":
             raise SandboxCrashed(value)
+        if limit_hit:
+            raise SandboxCrashed(
+                f"değerlendirme bellek/özyineleme sınırına takıldı: {value}"
+            ) from None
         raise value
     finally:
         pool.release(worker)

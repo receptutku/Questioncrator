@@ -163,43 +163,29 @@ def test_kayitli_istisnalar_turuyle_doner(istisna):
     assert str(sonuc) == str(istisna)
 
 
-def test_istisna_kaydina_alt_sinif_eklenebilir():
+@pytest.fixture
+def gecici_kayit(monkeypatch):
+    monkeypatch.setattr(wire, "_EXCEPTIONS", dict(wire._EXCEPTIONS))
+
+
+def test_istisna_kaydina_alt_sinif_eklenebilir(gecici_kayit):
     class OzelHata(ValueError):
         pass
 
     ham = wire.dumps_error(OzelHata("özel"), retire=False, seq=SIRA)
     assert _coz(ham)[0] == "crash"
     wire.register_exception(OzelHata)
-    try:
-        status, sonuc, _ = _coz(ham)
-        assert status == "err" and type(sonuc) is OzelHata and str(sonuc) == "özel"
-    finally:
-        wire.unregister_exception(OzelHata)
+    status, sonuc, _ = _coz(ham)
+    assert status == "err" and type(sonuc) is OzelHata and str(sonuc) == "özel"
 
 
-def test_mesajdan_kurulamayan_istisna_crash_olur():
+def test_mesajdan_kurulamayan_istisna_crash_olur(gecici_kayit):
     class IkiArguman(Exception):
         def __init__(self, a, b):
             super().__init__(a, b)
 
     wire.register_exception(IkiArguman)
-    try:
-        assert _coz(wire.dumps_error(IkiArguman("x", "y"), retire=False, seq=SIRA))[0] == "crash"
-    finally:
-        wire.unregister_exception(IkiArguman)
-
-
-def test_istisna_from_message_yolu():
-    class IkiArguman(Exception):
-        def __init__(self, a, b):
-            super().__init__(a, b)
-
-    wire.register_exception(IkiArguman, from_message=lambda mesaj: IkiArguman(mesaj, None))
-    try:
-        status, sonuc, _ = _coz(wire.dumps_error(IkiArguman("x", "y"), retire=False, seq=SIRA))
-        assert status == "err" and type(sonuc) is IkiArguman
-    finally:
-        wire.unregister_exception(IkiArguman)
+    assert _coz(wire.dumps_error(IkiArguman("x", "y"), retire=False, seq=SIRA))[0] == "crash"
 
 
 @pytest.mark.parametrize("istisna", [StopIteration("dur"), LookupError("kayıtsız"), OSError("os")])
