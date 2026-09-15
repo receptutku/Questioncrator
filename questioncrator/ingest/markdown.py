@@ -11,7 +11,7 @@ from pathlib import Path
 
 from questioncrator.models import SourceQuestion
 
-_HEADING = re.compile(r"^###\s+(Soru|Cevap|Kazanım)\s*$", re.MULTILINE)
+_HEADING = re.compile(r"^###\s+(Soru|Cevap|Çözüm|Kazanım)\s*$", re.MULTILINE)
 
 
 def _parse_block(block: str) -> dict[str, str]:
@@ -28,9 +28,11 @@ def parse_pool(content: str) -> list[SourceQuestion]:
     """Markdown havuz içeriğini SourceQuestion listesine çevirir.
 
     Sorular `---` satırıyla ayrılır. Her blok `### Soru`, `### Cevap`,
-    ve `### Kazanım` başlıklarını taşıyabilir. `### Soru` yoksa blok
-    atlanır. `### Cevap` yoksa soru `needs_review=True` ile kaydedilir
-    (elle kontrol listesine düşer).
+    `### Çözüm` ve `### Kazanım` başlıklarını taşıyabilir. `### Soru`
+    yoksa blok atlanır. `### Cevap` yoksa soru `needs_review=True` ile
+    kaydedilir (elle kontrol listesine düşer). `### Çözüm` gövdesi
+    (varsa) insan tarafından okunacak çözüm metni olarak `answer_text`'e
+    yazılır; reçete yerine geçmez.
     """
     questions: list[SourceQuestion] = []
     for block in re.split(r"^---\s*$", content, flags=re.MULTILINE):
@@ -46,6 +48,8 @@ def parse_pool(content: str) -> list[SourceQuestion]:
                 recipe=recipe,
                 objective=fields.get("Kazanım") or None,
                 needs_review=recipe is None,
+                answer_text=fields.get("Çözüm") or None,
+                origin="markdown",
             )
         )
     return questions

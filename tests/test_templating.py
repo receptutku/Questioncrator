@@ -80,7 +80,7 @@ def test_render_metin_ve_recete():
         seed_bindings={"p0": 3, "p1": 5},
         seed_answer_ops=2,
     )
-    assert render.render_text(t, {"p0": 4, "p1": -2}) == "f(x) = 4x^2 + -2x"
+    assert render.render_text(t, {"p0": 4, "p1": -2}) == "f(x) = 4x^2 - 2x"
     assert render.render_recipe(t, {"p0": 4, "p1": -2}) == "diff((4)*x**2 + (-2)*x, x)"
 
 

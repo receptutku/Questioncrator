@@ -50,3 +50,11 @@ Birinci satır.
     (soru,) = markdown.parse_pool(icerik)
     assert soru.text == "Birinci satır.\nİkinci satır."
     assert soru.recipe == "2 + 2"
+
+
+def test_cozum_basligi_answer_text_olur():
+    icerik = "### Soru\nMetin\n\n### Cevap\n2*x\n\n### Çözüm\nCevap 2x olur.\n"
+    (soru,) = markdown.parse_pool(icerik)
+    assert soru.answer_text == "Cevap 2x olur."
+    assert soru.recipe == "2*x"
+    assert soru.origin == "markdown"
