@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import pathlib
+import subprocess
+import sys
 import time
 import types
 
@@ -254,3 +257,100 @@ def test_bayrak_disinda_lambdify_normal_calisir():
     x = sympy.Symbol("x")
     g = sympy.lambdify(x, x)
     assert g(3) == 3
+
+
+_KOK = pathlib.Path(__file__).resolve().parents[1]
+
+# Hocanın günlük olarak yazacağı reçeteler. Bunlar TAZE bir yorumlayıcıda
+# çalıştırılır: aynı süreçte koşmak hatayı maskeler, çünkü daha önceki bir
+# test tembel yüklenen sympy modüllerini çoktan içe aktarmış olabilir.
+TAZE_SUREC_RECETELERI = [
+    "simplify((x**2-1)/(x-1))",
+    "diff(3*x**2+5*x-2, x)",
+    "integrate(sin(x), (x, 0, pi))",
+    "limit(sin(3*x)/x, x, 0)",
+    "Matrix([[2,1],[4,3]]).det()",
+    "solve(x**2-4, x)",
+    "Sum(k, (k,1,10)).doit()",
+    "binomial(5,2)",
+    "gcd(12,18)",
+    "Eq(2*x, 6)",
+    "solveset(x**2-4, x)",
+    "Abs(-3)",
+    "Rational(3,4)**2",
+    "floor(7/2)",
+    "log(8,2)",
+    "factor(x**2-1)",
+    "expand((x+2)**3)",
+    "series(sin(x), x, 0, 4)",
+    "dsolve(Derivative(f(x),x) - x)",
+    "Matrix([[1,2],[3,4]]).inv()",
+    "factorint(60)",
+    "primerange(1, 20)",
+]
+
+
+@pytest.mark.parametrize("recete", TAZE_SUREC_RECETELERI)
+def test_mesru_recete_taze_yorumlayicida_calisir(recete):
+    """Her meşru reçete KENDİ taze yorumlayıcısında çalışmalı.
+
+    Bu testin alt süreç kullanması şart: `simplify` gibi işlevler
+    değerlendirme sırasında tembel içe aktarma yapar ve içe aktarılan modülün
+    gövdesi sympy'ye kendi sabit metinlerini ayrıştırtır. Aynı süreçte önceki
+    bir test o modülü zaten yüklediyse yol hiç tetiklenmez ve kırık davranış
+    görünmez olur. Üretimdeki işçi de her zaman taze bir süreçtir.
+    """
+    kod = f"from questioncrator.mathenv import parse; parse({recete!r})"
+    sonuc = subprocess.run(
+        [sys.executable, "-c", kod],
+        capture_output=True,
+        text=True,
+        cwd=str(_KOK),
+    )
+    assert sonuc.returncode == 0, f"{recete!r} taze süreçte başarısız:\n{sonuc.stderr}"
+
+
+def test_nfkc_yazimi_yasaklari_atlatamaz():
+    # Python tanımlayıcıları derleme anında NFKC'ye çevirir; ham jeton metnine
+    # bakan denetim `ｆunc`/`ｎame` gibi yazımlarla atlatılabiliyordu.
+    with pytest.raises(mathenv.UnsafeExpression):
+        mathenv.parse("x.\uff46unc(x.\uff4eame)")
+    with pytest.raises(mathenv.UnsafeExpression):
+        mathenv.parse("\uff33ymbol(x)")
+
+
+def test_turkce_harfli_ad_calismaya_devam_eder():
+    # Türkçe harfler NFKC altında değişmez; dizgesiz bağlamda eskisi gibi çalışır.
+    sonuc = mathenv.parse("şık + 1")
+    assert isinstance(sonuc, sympy.Basic)
+    assert "şık" in str(sonuc)
+
+
+def test_sozluk_donen_recete_normallesir():
+    sonuc = mathenv.parse("factorint(60)")
+    assert isinstance(sonuc, sympy.Basic)
+    assert sonuc == sympy.Dict({2: 2, 3: 1, 5: 1})
+
+
+def test_uretec_donen_recete_normallesir():
+    sonuc = mathenv.parse("primerange(1, 20)")
+    assert isinstance(sonuc, sympy.Basic)
+    assert list(sonuc) == [2, 3, 5, 7, 11, 13, 17, 19]
+
+
+def test_cok_uzun_uretec_reddedilir():
+    with pytest.raises(mathenv.UnsafeExpression):
+        mathenv.parse("primerange(1, 100000)")
+
+
+def test_sinirsiz_uretec_tuketilmeden_reddedilir():
+    """Üst sınır olmasaydı bu test sonsuza dek asılı kalırdı."""
+
+    def sonsuz():
+        sayi = 0
+        while True:
+            yield sayi
+            sayi += 1
+
+    with pytest.raises(mathenv.UnsafeExpression):
+        mathenv._normalize(sonsuz())

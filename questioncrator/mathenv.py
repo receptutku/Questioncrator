@@ -8,14 +8,18 @@ kadar geniş kalır ama Python'un geri kalanına erişemez.
 
 from __future__ import annotations
 
+import collections.abc
 import contextvars
 import functools
+import importlib
 import io
+import itertools
 import keyword
 import re
 import sys
 import tokenize
 import types
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
 
@@ -41,6 +45,9 @@ class EvaluationTimeout(Exception):
 
 MAX_RECIPE_LENGTH = 2000
 MAX_NUMBER_DIGITS = 12
+# Üreteç döndüren çağrılar için üst sınır: sonsuz bir üreteci tüketerek
+# bitirmeye asla çalışmayız.
+MAX_RESULT_ITEMS = 1000
 
 # İkincil koruma: yan etkili ya da ikinci bir eval açan sympy adları.
 # Birincil koruma dizge yasağı + alt çizgi yasağıdır (bkz. check_recipe).
@@ -74,9 +81,17 @@ _ALLOWED_KEYWORDS = frozenset({"True", "False", "None", "and", "or", "not", "in"
 # `parse_expr`in standart dönüşümleri (auto_symbol/auto_number) üretilen kodun
 # içine bu adları enjekte eder (çıplak `x` -> `Symbol('x')`, bilinmeyen çağrı
 # `f(x)` -> `Function('f')(x)`). Bu yüzden yasaklı olsalar bile ad alanında
-# kalmalıdırlar. Enjeksiyon her zaman derleme anındaki bir metin sabitiyle
-# olur; çalışma anında kurulmuş bir dizge asla bu adlara ulaşamaz çünkü
-# kullanıcı `Symbol`/`Function` jetonunu yazamaz (check_recipe reddeder).
+# kalmalıdırlar.
+#
+# Güvenli olmalarının nedeni iki ayrı olgudur:
+#   1. Enjeksiyon her zaman derleme anındaki bir metin sabitiyle (kullanıcının
+#      yazdığı adın kendisi) olur, çalışma anında kurulmuş bir değerle değil.
+#   2. Kullanıcının bu adlara doğrudan ulaşması `check_recipe`te kesilir. Bu
+#      yalnızca ad jetonları NFKC ile normalleştirildiği için doğrudur: Python
+#      tanımlayıcıları derleme anında NFKC'ye çevirir, dolayısıyla ham jeton
+#      metnine bakan bir denetim `ｆunc` / `Ｓymbol` gibi yazımlarla atlatılırdı.
+#      `check_recipe` hem normalleştirir hem de normalleşmiş biçim ham metinden
+#      farklıysa jetonu tümden reddeder.
 _PARSER_REQUIRED_NAMES = frozenset({"Symbol", "Function"})
 
 
@@ -103,7 +118,13 @@ def check_recipe(recipe: str) -> None:
             if len(re.sub(r"[^0-9]", "", token.string)) > MAX_NUMBER_DIGITS:
                 raise UnsafeExpression("çok büyük sayı literali reddedildi")
         if token.type == tokenize.NAME:
-            name = token.string
+            # Python tanımlayıcıları derleme anında NFKC'ye çevirir; ham jeton
+            # metnine bakmak `ｆunc` gibi yazımların yasakları atlatmasına yol
+            # açardı. Önce normalleştirir, sonra farklıysa tümden reddederiz.
+            raw = token.string
+            name = unicodedata.normalize("NFKC", raw)
+            if name != raw:
+                raise UnsafeExpression("NFKC dışı yazımlı ad içeren reçete reddedildi")
             if keyword.iskeyword(name) and name not in _ALLOWED_KEYWORDS:
                 raise UnsafeExpression(f"`{name}` içeren reçete reddedildi")
             if name in DENIED_NAMES or name.startswith(DENIED_PREFIXES):
@@ -142,7 +163,26 @@ _evaluating_recipe: contextvars.ContextVar[bool] = contextvars.ContextVar(
 )
 
 
-@functools.wraps(_original_parse_expr)
+def _in_module_import() -> bool:
+    """Yığında bir modül içe aktarma işlemi var mı?
+
+    `simplify` gibi sympy işlevleri değerlendirme sırasında tembel içe aktarma
+    yapar; içe aktarılan modülün gövdesi kendi sabit metinlerini sympy'ye
+    ayrıştırtabilir. Bu, saldırganın kurduğu bir dizge değil, sympy'nin kendi
+    derleme-anı sabitidir: bir içe aktarma sırasında saldırgan dizgesi asla
+    ortaya çıkmaz. Bu yüzden muafiyet kesindir, saldırı yüzeyini genişletmez.
+    """
+    frame = sys._getframe(1)
+    while frame is not None:
+        module_name = frame.f_globals.get("__name__", "")
+        if isinstance(module_name, str) and module_name.startswith("importlib._bootstrap"):
+            return True
+        frame = frame.f_back
+    return False
+
+
+# Not: `functools.wraps` kullanmıyoruz — sarmalanan özgün işleve `__wrapped__`
+# üzerinden muhafızsız bir tutamak bırakırdı.
 def _guarded_parse_expr(*args: object, **kwargs: object) -> object:
     """`sympy.parsing.sympy_parser.parse_expr` yerine geçen muhafız.
 
@@ -150,8 +190,10 @@ def _guarded_parse_expr(*args: object, **kwargs: object) -> object:
     `sympify(<dizge>)` ya da `simplify(<dizge>)`) bir dizgeyi yeniden
     ayrıştırmaya kalkarsa, o ikinci eval'ı burada durdururuz. Kendi
     `parse`imiz özgün başvuruyu (`_original_parse_expr`) doğrudan çağırır.
+
+    Tek muafiyet: sürmekte olan bir modül içe aktarma (bkz. `_in_module_import`).
     """
-    if _evaluating_recipe.get():
+    if _evaluating_recipe.get() and not _in_module_import():
         raise UnsafeExpression("reçete değerlendirilirken dizge ayrıştırma reddedildi")
     return _original_parse_expr(*args, **kwargs)
 
@@ -175,7 +217,9 @@ _install_parse_guard()
 _original_lambdify = getattr(sympy.lambdify, "_qc_original", sympy.lambdify)
 
 
-@functools.wraps(_original_lambdify)
+# `functools.wraps` yok: `__wrapped__` muhafızsız bir tutamak bırakırdı.
+# Muafiyet de yok — dinamik tarama içe aktarma anında lambdify çağıran hiçbir
+# sympy modülü bulamadı, bu yüzden bu muhafız koşulsuz kalır.
 def _guarded_lambdify(*args: object, **kwargs: object) -> object:
     """`sympy.lambdify` yerine geçen muhafız (tüm bağlarında).
 
@@ -201,6 +245,12 @@ def _install_lambdify_guard() -> None:
     modüllerinde nesne kimliği (`is _original_lambdify`) eşleşen her adı
     değiştiririz. Kaynak modül niteliği de değiştiği için, sonradan yüklenen
     modüllerin `from ... import lambdify`i doğrudan muhafızı alır.
+
+    Bilinen sınır: `sympy.utilities.lambdify` modülü `importlib.reload` ile
+    yeniden yüklenirse muhafızsız bağ geri gelir, üstelik `_qc_guard` işareti
+    de kaybolacağı için bu işlev yeniden kurulum yapmaz. Uygulama sympy'yi
+    yeniden yüklemez; yine de bu durumda `_install_lambdify_guard()` elle
+    çağrılmalıdır.
     """
     if getattr(sympy.lambdify, "_qc_guard", False):
         return
@@ -222,26 +272,51 @@ def _install_lambdify_guard() -> None:
 _install_lambdify_guard()
 
 
+def _warm_lazy_importers() -> None:
+    """İçe aktarma anında dizge ayrıştıran sympy modüllerini önceden yükler.
+
+    Muhafız içe aktarma çerçevelerini zaten muaf tutar (bkz.
+    `_in_module_import`); bu yükleme ikinci emniyet kemeridir. Dinamik tarama,
+    değerlendirme sırasında tembel olarak yüklenip gövdesinde dizge ayrıştıran
+    tek sıcak yolun birim/önek modülü olduğunu gösterdi.
+    """
+    try:
+        importlib.import_module("sympy.physics.units")
+    except Exception:  # pragma: no cover - ortama bağlı
+        pass
+
+
+_warm_lazy_importers()
+
+
 def _normalize(value: object) -> sympy.Basic:
     """SymPy'nin Basic olmayan dönüşlerini Basic'e çevirir.
 
-    Bazı sympy çağrıları düz Python listesi ya da değişebilir bir kap
-    nesnesi döndürür. Boru hattının geri kalanı her yerde `Basic` bekler,
-    bu yüzden tek noktada normalleştiririz. Yalnız sayı, `Basic`, `MatrixBase`
-    ve bunların list/tuple/set kümeleri kabul edilir; dizge (str/bytes) ya da
-    başka bir Python nesnesi asla `sympify`e verilmez — aksi halde çalışma
-    anında kurulmuş bir dizge ikinci bir eval'a sızabilirdi.
+    Bazı sympy çağrıları düz Python listesi, sözlük, üreteç ya da değişebilir
+    bir kap nesnesi döndürür. Boru hattının geri kalanı her yerde `Basic`
+    bekler, bu yüzden tek noktada normalleştiririz. Dizge (str/bytes) asla
+    kabul edilmez — aksi halde çalışma anında kurulmuş bir dizge ikinci bir
+    eval'a sızabilirdi; bu kapı taşıyıcıdır.
     """
     if isinstance(value, (str, bytes, bytearray)):
         raise UnsafeExpression("reçete metin değeri üretemez")
     if isinstance(value, sympy.matrices.MatrixBase):
         return sympy.ImmutableMatrix(value)
-    if isinstance(value, (list, tuple, set)):
+    if isinstance(value, dict):
+        # Çarpanlara ayırma gibi çağrılar sözlük döndürür.
+        return sympy.Dict({_normalize(k): _normalize(v) for k, v in value.items()})
+    if isinstance(value, (list, tuple, set, frozenset)):
         return sympy.Tuple(*[_normalize(v) for v in value])
     if isinstance(value, sympy.Basic):
         return value
     if isinstance(value, (bool, int, float, complex)):
         return sympy.sympify(value)
+    if isinstance(value, (range, collections.abc.Iterator)):
+        # Üreteç sonsuz olabilir; asla tüketerek bitirmeye çalışmayız.
+        items = list(itertools.islice(value, MAX_RESULT_ITEMS + 1))
+        if len(items) > MAX_RESULT_ITEMS:
+            raise UnsafeExpression("reçete çok uzun bir sonuç üretti")
+        return sympy.Tuple(*[_normalize(v) for v in items])
     raise UnsafeExpression("reçete beklenmeyen bir değer türü üretti")
 
 
