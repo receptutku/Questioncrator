@@ -18,11 +18,12 @@ def test_katsayilar_parametrelesir():
         "diff(3*x**2 + 5*x - 2, x)",
     )
     t = extract.extract_template(s, "t1")
-    # 2 metinde üs olarak da geçtiği (`x^2`) için tamamen sabit kalır.
-    assert t.recipe == "diff({p0}*x**2 + {p1}*x - 2, x)"
-    assert t.skeleton == "f(x) = {p0}x^2 + {p1}x - 2 fonksiyonunun türevini bulunuz."
-    assert [p.name for p in t.parameters] == ["p0", "p1"]
-    assert t.seed_bindings == {"p0": 3, "p1": 5}
+    # `x^2`deki 2 basit üs, reçetedeki `**2` ile eşleşir ve sabit kalır;
+    # `- 2` ise güvenli geçiştir ve parametreleşir.
+    assert t.recipe == "diff({p0}*x**2 + {p1}*x - {p2}, x)"
+    assert t.skeleton == "f(x) = {p0}x^2 + {p1}x - {p2} fonksiyonunun türevini bulunuz."
+    assert [p.name for p in t.parameters] == ["p0", "p1", "p2"]
+    assert t.seed_bindings == {"p0": 3, "p1": 5, "p2": 2}
 
 
 def test_us_parametrelesmez():
@@ -86,16 +87,16 @@ def test_render_metin_ve_recete():
 
 
 def test_yildiz_us_gosterimi_metinde_korunur():
-    """`**2` üs gösterimi metinde güvensiz bağlamdır; aynı değerli katsayı
-    da dahil 2 hiçbir yerde parametreleşmez."""
+    """`**2` metinde basit üstür, reçetedeki `**2` ile eşleşir; aynı
+    değerli katsayı parametreleşirken üs değişmez."""
     s = kaynak(
-        "f(x) = x**2 + 2y + 3 ifadesidir.",
-        "x**2 + 2*y + 3",
+        "f(x) = x**2 + 2y ifadesidir.",
+        "x**2 + 2*y",
     )
     t = extract.extract_template(s, "t1")
-    assert t.recipe == "x**2 + 2*y + {p0}"
-    assert t.skeleton == "f(x) = x**2 + 2y + {p0} ifadesidir."
-    assert t.seed_bindings == {"p0": 3}
+    assert t.recipe == "x**2 + {p0}*y"
+    assert t.skeleton == "f(x) = x**2 + {p0}y ifadesidir."
+    assert t.seed_bindings == {"p0": 2}
 
 
 def test_coklu_satir_recete_dogru_degistirilir():
@@ -133,11 +134,38 @@ def test_suslu_us_metinde_parametrelesmez():
 
 
 def test_ayni_sayi_hem_us_hem_katsayi():
-    """Değer metinde tek bir güvensiz geçişte bile tamamen sabit kalır."""
+    """Basit üsler (`^{2}`, `^2`, `**2`, `²`) reçete üsleriyle sayıca
+    eşleşirse katsayı parametreleşir, üsler sabit kalır."""
     s = kaynak("$x^{2} + 2x + 3$", "x**2 + 2*x + 3")
     t = extract.extract_template(s, "t1")
-    assert t.recipe == "x**2 + 2*x + {p0}"
-    assert t.skeleton == "$x^{2} + 2x + {p0}$"
+    assert t.recipe == "x**2 + {p0}*x + {p1}"
+    assert t.skeleton == "$x^{2} + {p0}x + {p1}$"
+    t = extract.extract_template(kaynak("x² + 2x", "x**2 + 2*x"), "t1")
+    assert (t.skeleton, t.recipe) == ("x² + {p0}x", "x**2 + {p0}*x")
+
+
+@pytest.mark.parametrize(
+    ("metin", "recete", "sabit"),
+    [
+        # |E| = 2, |R_E| = 1: metindeki üslerden biri reçetede üs değil.
+        ("$x^2 + 2x^2 + 3$", "x**2 + 2*x*x + 3", 2),
+        # |S| = 1, |R_S| = 2: reçetede metinde görünmeyen bir 2 daha var.
+        ("$x^2 + 2$ ve 3", "x**2 + 2 + 2*3", 2),
+        # |S| = 2, |R_S| = 1: şıktaki 2 reçetede yok.
+        ("$2x = 4$\n- 2\n- 3", "solve(2*x - 4, x)", 2),
+        # S yok.
+        (r"$x^2 \cdot x^2 + 3$", "x**2 * x**2 + 3", 2),
+        # Karma üs U sayılır.
+        ("$e^{2x} + 2x + 3$", "exp(2*x) + 2*x + 3", 2),
+        ("$x^{-2} + 2 + 3$", "x**-2 + 2 + 3", 2),
+        # Markdown kalın yazı `**` üs değildir (tutucu: U).
+        ("**3** elma ve 5 armut", "3 + 5", 3),
+    ],
+)
+def test_sayim_uyusmazliginda_deger_sabit_kalir(metin, recete, sabit):
+    t = extract.extract_template(kaynak(metin, recete), "t1")
+    assert sabit not in t.seed_bindings.values(), t.recipe
+    assert "{" + "p0" + "}" in t.recipe
 
 
 @pytest.mark.parametrize(
@@ -146,7 +174,6 @@ def test_ayni_sayi_hem_us_hem_katsayi():
         ("$e^{2x}$ türevini bulunuz.", "diff(exp(2*x), x)"),
         (r"$\sqrt[3]{x} + 3x$", "diff(cbrt(x) + 3*x, x)"),
         ("$x_{2} + 2$", "2"),
-        ("x² + 2x", "x**2 + 2*x"),
         ("Bir kalem 2,5 TL", "Rational(5, 2)"),
         ("Bir kalem 2.5 TL", "Rational(5, 2)"),
     ],
@@ -158,8 +185,8 @@ def test_guvensiz_baglamdaki_deger_hicbir_yerde_parametrelesmez(metin, recete):
 
 def test_baska_sayinin_icinde_gecen_deger_sabit_kalir():
     """`12` içinde `2` geçtiği için 2 sabit kalır; 12 ayrı ve güvenlidir."""
-    t = extract.extract_template(kaynak("12 elmanın 2 katı", "2*12 - 12"), "t1")
-    assert t.recipe == "2*{p0} - {p0}"
+    t = extract.extract_template(kaynak("12 elmanın 2 katı", "2*12"), "t1")
+    assert t.recipe == "2*{p0}"
     assert t.skeleton == "{p0} elmanın 2 katı"
 
 

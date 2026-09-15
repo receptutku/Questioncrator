@@ -1,5 +1,5 @@
 [
-  {"id": "polinom-turev", "metin": "f(x) = 3x^2 + 5x - 2 fonksiyonunun türevini bulunuz.", "recete": "diff(3*x**2 + 5*x - 2, x)", "parametreler": [3, 5]},
+  {"id": "polinom-turev", "metin": "f(x) = 3x^2 + 5x - 2 fonksiyonunun türevini bulunuz.", "recete": "diff(3*x**2 + 5*x - 2, x)", "parametreler": [3, 5, 2]},
   {"id": "ustel-e-2x", "metin": "$e^{2x}$ fonksiyonunun türevini bulunuz.", "recete": "diff(exp(2*x), x)", "parametreler": []},
   {"id": "ustel-2-uzeri-3x", "metin": "$2^{3x}$ ifadesinin türevini bulunuz.", "recete": "diff(2**(3*x), x)", "parametreler": [2]},
   {"id": "iki-basamakli-us", "metin": "$x^{12} + 4x$ ifadesinin türevini bulunuz.", "recete": "diff(x**12 + 4*x, x)", "parametreler": [4]},
@@ -20,9 +20,9 @@
   {"id": "yuzde-tersten", "metin": "%20'si 8 olan sayı kaçtır?", "recete": "8*100/20", "parametreler": [8, 20]},
   {"id": "frac-toplam", "metin": "$\\frac{3}{4} + \\frac{1}{2}$ işleminin sonucu nedir?", "recete": "Rational(3, 4) + Rational(1, 2)", "parametreler": [3, 4, 1, 2]},
   {"id": "cdot-ve-basamak-ici", "metin": "$2 \\cdot 3x = 12$ ise $x$ kaçtır?", "recete": "solve(2*3*x - 12, x)", "parametreler": [3, 12]},
-  {"id": "madde-isaretli-siklar", "metin": "$2x + 3 = 7$ denkleminin çözümü hangisidir?\n- 1\n- 2\n- 3", "recete": "solve(2*x + 3 - 7, x)", "parametreler": [2, 3, 7]},
-  {"id": "ayni-sayi-us-ve-katsayi", "metin": "$x^2 + 2x$ ifadesinin türevini bulunuz.", "recete": "diff(x**2 + 2*x, x)", "parametreler": []},
-  {"id": "suslu-us-ve-sabit", "metin": "$4x^{2} + 2$ ifadesinin türevini bulunuz.", "recete": "diff(4*x**2 + 2, x)", "parametreler": [4]},
+  {"id": "madde-isaretli-siklar", "metin": "$2x + 3 = 7$ denkleminin çözümü hangisidir?\n- 1\n- 2\n- 3", "recete": "solve(2*x + 3 - 7, x)", "parametreler": [7]},
+  {"id": "ayni-sayi-us-ve-katsayi", "metin": "$x^2 + 2x$ ifadesinin türevini bulunuz.", "recete": "diff(x**2 + 2*x, x)", "parametreler": [2]},
+  {"id": "suslu-us-ve-sabit", "metin": "$4x^{2} + 2$ ifadesinin türevini bulunuz.", "recete": "diff(4*x**2 + 2, x)", "parametreler": [4, 2]},
   {"id": "bir-katsayi", "metin": "1x + 5 = 9 denklemini çözünüz.", "recete": "solve(1*x + 5 - 9, x)", "parametreler": [1, 5, 9], "beklenen_metin": "x + 5 = 9 denklemini çözünüz."},
   {"id": "faktoriyel", "metin": "5! değeri kaçtır?", "recete": "factorial(5)", "parametreler": [5]},
   {"id": "faktoriyel-frac", "metin": "$\\frac{6!}{4!}$ kaçtır?", "recete": "factorial(6)/factorial(4)", "parametreler": [6, 4]},
@@ -34,5 +34,12 @@
   {"id": "logaritma-taban", "metin": "$\\log_{2} 8$ kaçtır?", "recete": "log(8, 2)", "parametreler": [8]},
   {"id": "ondalik-alan", "metin": "Bir dikdörtgenin kenarları 3,2 cm ve 5 cm'dir. Alanı kaç cm²'dir?", "recete": "Rational(32, 10)*5", "parametreler": [5]},
   {"id": "parantez-kup", "metin": "$(x+1)^{3}$ ifadesinin türevinin $x = 0$ için değeri kaçtır?", "recete": "diff((x+1)**3, x).subs(x, 0)", "parametreler": [1]},
-  {"id": "denklem-iki-taraf", "metin": "$5x - 3 = 2x + 9$ denkleminde $x$ kaçtır?", "recete": "solve(5*x - 3 - (2*x + 9), x)", "parametreler": [5, 3, 2, 9]}
+  {"id": "denklem-iki-taraf", "metin": "$5x - 3 = 2x + 9$ denkleminde $x$ kaçtır?", "recete": "solve(5*x - 3 - (2*x + 9), x)", "parametreler": [5, 3, 2, 9]},
+  {"id": "us-ve-sabit-ayni", "metin": "$x^{2} - 2$ ifadesini sadeleştiriniz.", "recete": "x**2 - 2", "parametreler": [2]},
+  {"id": "katsayi-ve-us-ayni", "metin": "$2x^2$ ifadesinin türevini bulunuz.", "recete": "diff(2*x**2, x)", "parametreler": [2]},
+  {"id": "iki-us-guvenli-yok", "metin": "$x^2 \\cdot x^2$ çarpımını sadeleştiriniz.", "recete": "x**2 * x**2", "parametreler": []},
+  {"id": "recetede-gizli-literal", "metin": "$x^2 + 2$ ifadesini sadeleştiriniz.", "recete": "x**2 + 2 + 2*0", "parametreler": []},
+  {"id": "karma-us-ve-katsayi", "metin": "$e^{2x} + 2x$ ifadesini yazınız.", "recete": "exp(2*x) + 2*x", "parametreler": []},
+  {"id": "ust-simge-ve-katsayi", "metin": "x² + 2x ifadesinin türevini bulunuz.", "recete": "diff(x**2 + 2*x, x)", "parametreler": [2]},
+  {"id": "markdown-kalin", "metin": "**Soru 3:** 3x + 5 ifadesinin türevini bulunuz.", "recete": "diff(3*x + 5, x)", "parametreler": [5]}
 ]
