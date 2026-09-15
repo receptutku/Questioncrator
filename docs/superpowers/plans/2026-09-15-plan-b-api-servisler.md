@@ -529,6 +529,7 @@ git commit -m "feat(accounts): ayarlar, parola/oturum güvenliği ve hesap verit
 
 **Files:**
 - Create: `questioncrator/storage.py`, `questioncrator/services/__init__.py` (`"""HTTP'den bağımsız uygulama servisleri."""`), `questioncrator/services/errors.py`, `questioncrator/services/jobs.py`
+- Modify: `questioncrator/models.py` (`PreviewVariant`, `RecipePreview` eklenir)
 - Test: `tests/test_storage.py`, `tests/test_jobs.py`
 
 **Interfaces:**
@@ -540,8 +541,8 @@ git commit -m "feat(accounts): ayarlar, parola/oturum güvenliği ve hesap verit
   - `storage.backup_workspace(settings, workspace_id) -> bytes` (sqlite `backup` API ile tutarlı kopya)
   - `errors.ServiceError(Exception)` (`.message: str`), alt sınıflar: `NotFound`, `Conflict`, `Invalid`, `Timeout`, `Unavailable`
   - `jobs.EXTRACT_TIMEOUT = 20.0`, `jobs.PREVIEW_TIMEOUT = 20.0`, `jobs.GENERATE_TIMEOUT = 120.0`
-  - `jobs.PreviewVariant(text: str, answer_latex: str, choices: tuple[str, ...], correct_index: int | None)`
-  - `jobs.RecipePreview(ok: bool, answer_latex: str | None, parameter_count: int, difficulty: float | None, variants: tuple[PreviewVariant, ...], error: str | None)`
+  - `models.PreviewVariant(text: str, answer_latex: str, choices: tuple[str, ...], correct_index: int | None)` — frozen dataclass, `questioncrator/models.py`'ye eklenir (sandbox JSON kodeği yalnız `models` dataclass'larını aktarır)
+  - `models.RecipePreview(ok: bool, answer_latex: str | None, parameter_count: int, difficulty: float | None, variants: tuple[PreviewVariant, ...], error: str | None)` — aynı gerekçeyle `models.py`'de
   - `jobs.extract_job(source: SourceQuestion, template_id: str) -> Template | str` — başarısızsa Türkçe neden dizesi
   - `jobs.preview_job(text: str, recipe: str, seed: int, samples: int = 3) -> RecipePreview`
   - `jobs.generate_job(templates: list[Template], request: GenerationRequest, *, seed: int, now: str, seen_answer_keys: set[str], weights: dict[str, float], difficulties: dict[str, float]) -> list[GeneratedQuestion]` — soru kimlikleri `ids.new_id("q")` (rastgele, `secrets`), örnekleme `random.Random(seed)`
@@ -551,7 +552,7 @@ git commit -m "feat(accounts): ayarlar, parola/oturum güvenliği ve hesap verit
 - Soru kimlikleri servis sınırında kriptografik rastgeledir: aynı tohumla iki üretim partisi aynı kimliği üretip upsert ile birbirini ezemez. (Ruling: Plan A `id_factory` sözleşmesi korunur; deterministik kimlik yalnız çekirdek birim testlerinde kullanılır.)
 - `extract_job` hata dizeleri: reçetesiz → `"Cevap reçetesi yok."`; `NoParametersFound` → `"Reçetede değiştirilebilir sayı bulunamadı."`; `EvaluationFailed`/zaman aşımı → `"Reçete hesaplanamadı: <neden>"`; tohum cevabı `answer_problems` döndürürse → `"Reçetenin cevabı kullanılamaz: <ilk not>"`.
 - `preview_job`: önce `evaluate_answer(recipe)`; hata → `ok=False, error="Reçete hesaplanamadı: ..."`. Sonra şablon çıkarımı; `NoParametersFound` ise `ok=True, parameter_count=0, variants=()` ve `error="Reçetede değiştirilebilir sayı yok; bu soru olduğu gibi kalır, varyant üretilemez."`. Aksi halde `generate_from_template(count=samples, rng=Random(seed), seen_answer_keys=set(), id_factory=lambda: "onizleme")` ile varyantlar; `difficulty = template.difficulty_estimate`.
-- `jobs.py` içindeki tüm fonksiyonlar modül düzeyindedir ve yalnız pickle'lanabilir değerler alır/döndürür (sandbox işçisi süreç sınırı).
+- `jobs.py` içindeki tüm fonksiyonlar modül düzeyindedir. Argümanlar pickle ile işçiye gider (güvenilir yön). Dönüş değerleri ve yükseltilen istisnalar sandbox'ın JSON kodeğinden geçmelidir: None/bool/int/float/str/list/tuple, yalnız str anahtarlı dict, `questioncrator.models` dataclass'ları; istisnalar kodekin eşlemesindeki türler. set, bytes, sympy nesnesi dönmez (işçide `str`/`tuple`'a çevrilir), aksi halde `SandboxCrashed` → `errors.Unavailable`. `test_jobs.py`'de her iş fonksiyonunun dönüşü bir kez `QC_SANDBOX=process` ile uçtan uca koşturulur (kodek uyumu).
 
 - [ ] **Adım 1: Başarısız testleri yaz**
 
@@ -777,26 +778,26 @@ def backup_workspace(settings: Settings, workspace_id: str) -> bytes:
 ```python
 """İzole değerlendirme sürecinde koşan saf işler.
 
-Bu fonksiyonlar veritabanına dokunmaz; yalnız pickle'lanabilir değer alıp
-döndürür. Servisler bunları `run` ile sandbox işçisine gönderir.
+Bu fonksiyonlar veritabanına dokunmaz; dönüşleri sandbox'ın JSON kodeğinden
+geçen değerlerdir (ilkel türler ve `models` dataclass'ları). Servisler bunları
+`run` ile sandbox işçisine gönderir.
 """
 
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass
 from typing import Any
 
 from questioncrator import sandbox
 from questioncrator.generation.engine import GenerationRequest, generate_batch, generate_from_template
 from questioncrator.ids import new_id
 from questioncrator.mathenv import EvaluationTimeout
-from questioncrator.models import GeneratedQuestion, SourceQuestion, Template
+from questioncrator.models import GeneratedQuestion, PreviewVariant, RecipePreview, SourceQuestion, Template
 from questioncrator.services import errors
 from questioncrator.templating.extract import NoParametersFound, extract_template
 from questioncrator.verification.checks import EvaluationFailed, answer_problems, evaluate_answer
 
-# ... sabitler, PreviewVariant, RecipePreview, extract_job, preview_job, generate_job, run
+# ... sabitler, extract_job, preview_job, generate_job, run
 ```
 
 `extract_job` tohum cevabını `evaluate_answer` ile ayrıca hesaplayıp `answer_problems(answer)` boş değilse ilk notu döndürür (şablon üretime giremeyecek bir kaynağı erkenden yakalamak için). `extract_template` içindeki `parse_with_timeout` `EvaluationTimeout` fırlatabilir; o da `"Reçete hesaplanamadı: ..."` olur.
@@ -818,7 +819,7 @@ git commit -m "feat(services): çalışma alanı depolaması, servis hataları v
 - Test: `tests/test_services_pool.py`
 
 **Interfaces:**
-- Consumes: `db.*`, `markdown.parse_pool`, `jobs.run/extract_job/preview_job/EXTRACT_TIMEOUT/PREVIEW_TIMEOUT/RecipePreview`, `errors.*`, `ids.new_id`
+- Consumes: `db.*`, `markdown.parse_pool`, `jobs.run/extract_job/preview_job/EXTRACT_TIMEOUT/PREVIEW_TIMEOUT`, `models.RecipePreview`, `errors.*`, `ids.new_id`
 - Produces:
   - `pool.MAX_TEXT_LENGTH = 5000`, `pool.MAX_OBJECTIVE_LENGTH = 100`
   - `pool.PoolSummary(total: int, ready: int, needs_review: int, templates_by_status: dict[str, int], by_objective: dict[str, int])`

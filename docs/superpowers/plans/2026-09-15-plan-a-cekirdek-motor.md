@@ -1449,6 +1449,7 @@ git commit -m "fix(render): LaTeX parantezleri, işaret ve katsayı sadeleştirm
   - `checks.evaluate_answer(recipe: str, *, timeout=5.0) -> sympy.Basic` (hata türlerini `ValueError` altında birleştirir: `checks.EvaluationFailed(ValueError)`)
   - `checks.answer_problems(answer: sympy.Basic, *, seed_answer_ops: int = 0) -> list[str]` — tanımsızlık, dejenerelik, sayı büyüklüğü, değerlendirilmemiş işlem, görsel uzunluk kontrolleri (çeldiriciler de kullanır)
   - `checks.MAX_NUMERATOR = 9999`, `checks.MAX_DENOMINATOR = 99`, `checks.MIN_OPS_RATIO = 0.5`, `checks.MAX_LATEX_LENGTH = 160`
+- Not (controller, Task 2 sonrası): `EvaluationFailed` sandbox işçisinden ebeveyne taşınabilmesi için `questioncrator/wire.py` istisna kaydına eklenmeli (sabit sözlük ya da `register_exception`); bunu sabitleyen bir gidiş-dönüş testi `tests/test_wire.py`'ye eklenir. `VerificationResult.answer` (sympy) sandbox sınırından geçmez — sandbox üzerinden dönen yollar cevabı str/latex'e çevirir.
 
 - [ ] **Adım 1: Başarısız testleri yaz**
 
