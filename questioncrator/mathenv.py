@@ -13,6 +13,7 @@ import functools
 import io
 import keyword
 import re
+import sys
 import tokenize
 import types
 from concurrent.futures import ThreadPoolExecutor
@@ -58,10 +59,25 @@ DENIED_NAMES = frozenset(
         "rust_code", "glsl_code", "smtlib_code", "print_tree",
         # `.name` gibi dizge döndüren nitelikler reçetede gereksizdir.
         "name",
+        # Dizgeden adlı sembol/işlev kurup kod üretimi (lambdify/exec) ya da
+        # derleme (autowrap/codegen -> subprocess) sinklerine ulaşan adlar.
+        # Reçeteler sembolleri `auto_symbol` ile (çıplak `x`) alır; dizgeden
+        # adlı bir Function/Symbol kurmaya asla ihtiyaç duymaz.
+        "Function", "Symbol", "Dummy", "Wild", "symbols", "nsolve",
+        "autowrap", "ufuncify", "binary_function", "codegen",
+        "implemented_function",
     }
 )  # fmt: skip
 DENIED_PREFIXES = ("_", "plot", "print_", "pprint")
 _ALLOWED_KEYWORDS = frozenset({"True", "False", "None", "and", "or", "not", "in", "is"})
+
+# `parse_expr`in standart dönüşümleri (auto_symbol/auto_number) üretilen kodun
+# içine bu adları enjekte eder (çıplak `x` -> `Symbol('x')`, bilinmeyen çağrı
+# `f(x)` -> `Function('f')(x)`). Bu yüzden yasaklı olsalar bile ad alanında
+# kalmalıdırlar. Enjeksiyon her zaman derleme anındaki bir metin sabitiyle
+# olur; çalışma anında kurulmuş bir dizge asla bu adlara ulaşamaz çünkü
+# kullanıcı `Symbol`/`Function` jetonunu yazamaz (check_recipe reddeder).
+_PARSER_REQUIRED_NAMES = frozenset({"Symbol", "Function"})
 
 
 def check_recipe(recipe: str) -> None:
@@ -98,7 +114,8 @@ def check_recipe(recipe: str) -> None:
 def _base_namespace() -> dict[str, object]:
     namespace: dict[str, object] = {}
     for name in sympy.__all__:
-        if name in DENIED_NAMES or name.startswith(DENIED_PREFIXES):
+        denied = name in DENIED_NAMES or name.startswith(DENIED_PREFIXES)
+        if denied and name not in _PARSER_REQUIRED_NAMES:
             continue
         value = getattr(sympy, name)
         if isinstance(value, types.ModuleType):
@@ -148,6 +165,61 @@ def _install_parse_guard() -> None:
 
 
 _install_parse_guard()
+
+
+# `lambdify` üretilmiş Python kaynağını `exec`ler; `nsolve` gibi çağrılar buna
+# dayanır. `Function(<dizge>)` tırnaksız kurulan bir adı sympify etmeden kabul
+# ettiğinden, çalışma anında kurulmuş bir ad `lambdify`in `exec`ine sızabilir.
+# Bu sink `parse_expr` ya da `_normalize` yolundan geçmez; bu yüzden ayrı bir
+# muhafızla kapatılır.
+_original_lambdify = getattr(sympy.lambdify, "_qc_original", sympy.lambdify)
+
+
+@functools.wraps(_original_lambdify)
+def _guarded_lambdify(*args: object, **kwargs: object) -> object:
+    """`sympy.lambdify` yerine geçen muhafız (tüm bağlarında).
+
+    Reçete değerlendirilirken lambdify tabanlı her yol (örn. `nsolve`) kod
+    üretimini burada durdurur. Bayrak kapalıyken sympy'nin kendi lambdify
+    çağrıları özgün davranışla sürer.
+    """
+    if _evaluating_recipe.get():
+        raise UnsafeExpression("reçete değerlendirilirken kod üretimi reddedildi")
+    return _original_lambdify(*args, **kwargs)
+
+
+_guarded_lambdify._qc_guard = True  # type: ignore[attr-defined]
+_guarded_lambdify._qc_original = _original_lambdify  # type: ignore[attr-defined]
+
+
+def _install_lambdify_guard() -> None:
+    """`lambdify`in tüm sympy bağlarını kimlik üzerinden muhafızla değiştirir.
+
+    Farklı sympy modülleri lambdify'ı `from ... import lambdify` ile içe
+    aktarıp aynı işlev nesnesine ayrı adlar bağlar (örn. `solvers.lambdify`).
+    Sabit bir ad listesi kırılgan olurdu; bunun yerine yüklü tüm sympy
+    modüllerinde nesne kimliği (`is _original_lambdify`) eşleşen her adı
+    değiştiririz. Kaynak modül niteliği de değiştiği için, sonradan yüklenen
+    modüllerin `from ... import lambdify`i doğrudan muhafızı alır.
+    """
+    if getattr(sympy.lambdify, "_qc_guard", False):
+        return
+    for module in list(sys.modules.values()):
+        if module is None or not getattr(module, "__name__", "").startswith("sympy"):
+            continue
+        try:
+            members = list(vars(module).items())
+        except TypeError:
+            continue
+        for attribute, value in members:
+            if value is _original_lambdify:
+                try:
+                    setattr(module, attribute, _guarded_lambdify)
+                except (AttributeError, TypeError):
+                    pass
+
+
+_install_lambdify_guard()
 
 
 def _normalize(value: object) -> sympy.Basic:

@@ -121,9 +121,17 @@ def test_kacis_denemesi_kod_calistirmiyor(tmp_path, monkeypatch):
 def test_ad_alaninda_modul_ve_yasakli_ad_yok():
     ad_alani = mathenv._allowed_namespace()
     assert not [ad for ad, deger in ad_alani.items() if isinstance(deger, types.ModuleType)]
-    assert not (set(ad_alani) & mathenv.DENIED_NAMES)
+    # `Symbol`/`Function` yasaklı jetonlardır ama `parse_expr` dönüşümleri
+    # üretilen koda enjekte ettiği için ad alanında kalmaları gerekir; onlar
+    # dışında hiçbir yasaklı ad ad alanında olmamalı.
+    assert not (set(ad_alani) & (mathenv.DENIED_NAMES - mathenv._PARSER_REQUIRED_NAMES))
+    assert mathenv._PARSER_REQUIRED_NAMES <= set(ad_alani)
     assert not [
-        ad for ad in ad_alani if ad != "__builtins__" and ad.startswith(mathenv.DENIED_PREFIXES)
+        ad
+        for ad in ad_alani
+        if ad != "__builtins__"
+        and ad not in mathenv._PARSER_REQUIRED_NAMES
+        and ad.startswith(mathenv.DENIED_PREFIXES)
     ]
 
 
@@ -205,3 +213,44 @@ def test_bayrak_disinda_sympify_normal_calisir():
     # Küresel sarmalayıcı uygulamanın kendi `sympify` çağrılarını bozmamalı.
     assert not mathenv._evaluating_recipe.get()
     assert sympy.sympify("x + 1") == sympy.Symbol("x") + 1
+
+
+# İkinci sınıf "çalışma anında kurulan dizge" kaçışı: `nsolve` içeride
+# `lambdify` çağırır, o da üretilen Python kaynağını `exec`ler; `Function(<ad>)`
+# tırnaksız bir adı sympify etmeden kabul ettiği için bu adın içine kod
+# gizlenip lambdify'ın exec'ine sızabilirdi. Bu sink `parse_expr`/`_normalize`
+# yolundan geçmez, ayrı bir muhafızla kapatılır.
+def test_nsolve_receresi_reddedilir_ve_calistirmaz(tmp_path):
+    hedef = tmp_path / "izi_nsolve"
+    # Reçete düzeyinde `nsolve`/`Function` yasaklıdır; check_recipe hiç
+    # değerlendirmeden reddeder.
+    recete = "nsolve(Function(x)(x) - 1, x, 1)"
+    with pytest.raises(mathenv.UnsafeExpression):
+        mathenv.parse(recete)
+    assert not hedef.exists()
+
+
+def test_lambdify_sink_bayrak_icinde_kod_calistirmaz(tmp_path):
+    # Katman (kod üretimi muhafızı): bayrak açıkken lambdify tabanlı yol
+    # (`nsolve`) exec'e ulaşmadan durur; ad içine gizlenen os.mkdir çalışmaz.
+    hedef = tmp_path / "izi_lambdify"
+    x = sympy.Symbol("x")
+    kotu_ad = "__import__('os').mkdir('" + str(hedef) + "')or abs"
+    f = sympy.Function(kotu_ad)
+    jeton = mathenv._evaluating_recipe.set(True)
+    try:
+        with pytest.raises(mathenv.UnsafeExpression):
+            sympy.nsolve(f(x) - 1, x, 1)
+        with pytest.raises(mathenv.UnsafeExpression):
+            sympy.lambdify(x, x)
+    finally:
+        mathenv._evaluating_recipe.reset(jeton)
+    assert not hedef.exists()
+
+
+def test_bayrak_disinda_lambdify_normal_calisir():
+    # Muhafız sympy'nin kendi lambdify çağrılarını küresel olarak bozmamalı.
+    assert not mathenv._evaluating_recipe.get()
+    x = sympy.Symbol("x")
+    g = sympy.lambdify(x, x)
+    assert g(3) == 3
