@@ -49,15 +49,34 @@ MAX_NUMBER_DIGITS = 12
 # bitirmeye asla çalışmayız.
 MAX_RESULT_ITEMS = 1000
 
-# İkincil koruma: yan etkili ya da ikinci bir eval açan sympy adları.
+# Tehlikeli yerleşikler (builtins). Bunlar SYMPY ADI DEĞİLDİR; içerik tabanlı
+# muhafızın (`_guarded_parse_expr`) güvenliği bu adların yasaklı olmasına
+# BAĞLIDIR ve bu bir zorunluluktur, tercih değil. Neden: sympy'nin kendi
+# ayrıştırıcısı (`sympy/parsing/sympy_parser.py`, ~1051-1059) `builtins`
+# içindeki her `types.BuiltinFunctionType`i kendi ad alanına enjekte eder;
+# dolayısıyla iç ayrıştırılan bir dizge bu yasak olmadıkça `eval`/`exec`/`open`/
+# `getattr`/`compile`/`globals`/`locals`/`vars`/`setattr`/`delattr`/`input`/
+# `breakpoint`i görür. `check_recipe` bunları jeton olarak reddettiği için
+# saldırgan bu adları içeren bir dizgeyi iç ayrıştırıcıya geçiremez. Bu küme
+# BİLE BİLE ayrı tutulur ve `tests/test_mathenv.py::
+# test_tehlikeli_yerlesikler_reddedilir` onu literal bir listeye karşı sabitler:
+# ileride "bunlar sympy adı değil" diye budanırsa test kırılır.
+_DANGEROUS_BUILTINS = frozenset(
+    {
+        "exec", "eval", "open", "compile", "getattr", "setattr", "delattr",
+        "globals", "locals", "vars", "input", "breakpoint",
+    }
+)  # fmt: skip
+
+# İkincil koruma: yan etkili ya da ikinci bir eval açan sympy adları + yukarıdaki
+# tehlikeli yerleşikler + çalışma anında `str`/`bytes` üreten adlar.
 # Birincil koruma dizge yasağı + alt çizgi yasağıdır (bkz. check_recipe).
-DENIED_NAMES = frozenset(
+DENIED_NAMES = _DANGEROUS_BUILTINS | frozenset(
     {
         "sympify", "S", "parse_expr", "lambdify", "preview", "init_printing",
         "init_session", "var", "pprint", "pretty_print", "pager_print",
         "interactive_traversal", "textplot", "dotprint", "test", "doctest",
-        "exec", "eval", "open", "compile", "getattr", "setattr", "delattr",
-        "globals", "locals", "vars", "input", "help", "breakpoint", "exit", "quit",
+        "help", "exit", "quit",
         # Dizge üreten yazıcılar/işlevler: çıktıları çalışma anında birleşip
         # ikinci bir eval'a beslenebilir, bu yüzden reçetede kullanılamaz.
         "srepr", "sstr", "sstrrepr", "latex", "multiline_latex", "mathml",
@@ -73,11 +92,16 @@ DENIED_NAMES = frozenset(
         "Function", "Symbol", "Dummy", "Wild", "symbols", "nsolve",
         "autowrap", "ufuncify", "binary_function", "codegen",
         "implemented_function",
-        # F2 (ek önlem): reçete ad alanı taranarak (bkz.
-        # tests/test_mathenv.py::test_recete_ad_alani_metin_uretmez) çalışma
-        # anında Python `str`/`bytes` döndüren adların tümü bulundu ve buraya
-        # eklendi. `_normalize`in str/bytes kapısı yine de son emniyet kemeri;
-        # bu liste dizgenin ilk elde edilmesini de engeller.
+        # --- F2 (ek önlem): çalışma anında `str`/`bytes` üreten adlar ---
+        # DÜRÜST GARANTİ (R2): Bu liste + `check_recipe`, saldırganın SEÇTİĞİ
+        # hiçbir dizgenin çalışma anında elde edilememesini sağlar (marker BFS
+        # ile doğrulandı: reçetelerden erişilebilen her şey SABİT sympy
+        # sözcüğüdür). Buna karşılık sabit sympy sözcüğü dizgeleri (ör. bir
+        # niteliğin adı) bazı derin nitelik yollarından hâlâ elde edilebilir;
+        # bunların arkasında duran iki savunma içerik muhafızı ile
+        # `_normalize`in str/bytes kapısıdır. Yani bu liste "hiçbir dizge elde
+        # edilemez" GARANTİSİ VERMEZ; yalnız saldırgan-seçimi dizgeyi ve bilinen
+        # yüksek-değerli sızıntıları engeller.
         # (1) Doğrudan ya da kap içinde str döndüren üst düzey adlar:
         "FU", "capture", "timed", "default_sort_key", "filldedent",
         "poly_from_expr", "parallel_poly_from_expr",
@@ -91,6 +115,15 @@ DENIED_NAMES = frozenset(
         "rel_op", "sort_key", "class_key", "cache_parameters", "rules",
         "as_latex", "as_str", "table", "doprint", "emptyPrinter",
         "printmethod",
+        # (4) R1/R2: bellek kaldıracı ve nitelik yolu str/bytes sızıntıları.
+        # `to_bytes`/`from_bytes` sınırsız bellek ayırabilir (`MAX_NUMBER_DIGITS`
+        # 12 hane ~1 TB'a izin verir) ve tahsis, `parse_with_timeout`un
+        # öldüremediği işçi iş parçacığında `_normalize` kapısından ÖNCE olur —
+        # çok kiracılı bir işçide OOM kaldıracı. `assumptions0`/
+        # `default_assumptions`/`ValidRelationOperator` gerçek str anahtar/değer
+        # döndürür.
+        "to_bytes", "from_bytes", "assumptions0", "default_assumptions",
+        "ValidRelationOperator",
     }
 )  # fmt: skip
 DENIED_PREFIXES = ("_", "plot", "print_", "pprint")
@@ -365,17 +398,39 @@ def _guard_materialization(thunk):
     """Bir kap/üreteç gövdesini üretirken çıkan hatayı `UnsafeExpression`e sarar.
 
     Kap ya da üreteç gövdesinin gerçekleştirilmesi (öğelerin tüketilmesi) rasgele
-    sympy kodu çalıştırır ve bu kod `RecursionError` gibi çıplak bir istisna
-    yükseltebilir (ör. `continued_fraction_iterator(sqrt(2))`). Böyle bir hata ham
-    biçimde dışarı sızmamalı; temiz bir `UnsafeExpression`e çevrilir (F4). Zaten
-    `UnsafeExpression` olanlar (uzunluk sınırı, metin kapısı) olduğu gibi geçer.
+    sympy kodu çalıştırır ve bu kod çıplak bir istisna yükseltebilir. Böyle bir
+    hata ham biçimde dışarı sızmamalı; hepsi `UnsafeExpression`e çevrilir (F4) —
+    çağıranlar bu tek türe güvenir. Zaten `UnsafeExpression` olanlar (uzunluk
+    sınırı, metin kapısı) olduğu gibi geçer.
+
+    R4: Mesajlaşma iki durumu ayırır. Kaynak/özyineleme tükenmesi güvenlik
+    kokan bir sınır ihlalidir; ama sıradan bir matematik başarısızlığı
+    (`NotImplementedError`, `TypeError`) hocaya saldırı gibi sunulmamalı, bu
+    yüzden tarafsız "reçete sonucu üretilemedi" ile bildirilir.
     """
     try:
         return thunk()
     except UnsafeExpression:
         raise
-    except Exception as exc:  # RecursionError dâhil her şey
-        raise UnsafeExpression(f"reçete sonucu üretilirken hata: {exc}") from exc
+    except RecursionError as exc:
+        raise UnsafeExpression("reçete sonucu üretilirken özyineleme sınırı aşıldı") from exc
+    except MemoryError as exc:
+        raise UnsafeExpression("reçete sonucu üretilirken bellek sınırı aşıldı") from exc
+    except Exception as exc:
+        raise UnsafeExpression(f"reçete sonucu üretilemedi: {exc}") from exc
+
+
+def _materialize_container(items_thunk):
+    """Yinelenebilir bir kabı, tek tip bir üst sınır altında `Tuple`a çevirir.
+
+    Her kap dalı (sözlük/liste/demet/küme/üreteç) aynı `MAX_RESULT_ITEMS`
+    sınırını uygular (R5a): `islice` ile en çok sınır+1 öğe alınır, aşılırsa
+    reddedilir. Sonsuz bir üreteç asla tüketerek bitirilmez.
+    """
+    items = list(itertools.islice(items_thunk(), MAX_RESULT_ITEMS + 1))
+    if len(items) > MAX_RESULT_ITEMS:
+        raise UnsafeExpression("reçete çok uzun bir sonuç üretti")
+    return items
 
 
 def _normalize(value: object) -> sympy.Basic:
@@ -396,27 +451,24 @@ def _normalize(value: object) -> sympy.Basic:
     if isinstance(value, (bool, int, float, complex)):
         return sympy.sympify(value)
     if isinstance(value, collections.abc.Mapping):
-        # Çarpanlara ayırma gibi çağrılar sözlük döndürür.
-        return _guard_materialization(
-            lambda: sympy.Dict({_normalize(k): _normalize(v) for k, v in value.items()})
-        )
-    if isinstance(value, (list, tuple, set, frozenset)):
-        return _guard_materialization(lambda: sympy.Tuple(*[_normalize(v) for v in value]))
-    # Üreteç/menzil ve diğer yinelenebilirler (ör. `dict_keys`/`dict_items`:
-    # `Iterable` ama `Iterator` değil — F5a). str/bytes yukarıda, `Basic` ve
-    # `Matrix` de yukarıda ele alındığı için burada güvenle yakalanırlar.
-    if isinstance(value, (range, collections.abc.Iterator)) or isinstance(
-        value, collections.abc.Iterable
-    ):
+        # Çarpanlara ayırma gibi çağrılar sözlük döndürür. Sözlük de üst sınıra
+        # tabidir (R5a): anahtar-değer çiftleri sınırı aşarsa reddedilir.
+        def _build_dict() -> sympy.Basic:
+            ciftler = _materialize_container(lambda: iter(value.items()))
+            return sympy.Dict({_normalize(k): _normalize(v) for k, v in ciftler})
 
-        def _build() -> sympy.Basic:
-            # Üreteç sonsuz olabilir; asla tüketerek bitirmeye çalışmayız.
-            items = list(itertools.islice(iter(value), MAX_RESULT_ITEMS + 1))
-            if len(items) > MAX_RESULT_ITEMS:
-                raise UnsafeExpression("reçete çok uzun bir sonuç üretti")
+        return _guard_materialization(_build_dict)
+    # Üreteç/menzil, liste/demet/küme ve diğer yinelenebilirler (ör.
+    # `dict_keys`/`dict_items`: `Iterable` ama `Iterator` değil — F5a). str/bytes,
+    # `Basic` ve `Matrix` yukarıda ele alındığı için burada güvenle yakalanırlar.
+    # Hepsi aynı `MAX_RESULT_ITEMS` sınırına tabidir (R5a).
+    if isinstance(value, collections.abc.Iterable):
+
+        def _build_tuple() -> sympy.Basic:
+            items = _materialize_container(lambda: iter(value))
             return sympy.Tuple(*[_normalize(v) for v in items])
 
-        return _guard_materialization(_build)
+        return _guard_materialization(_build_tuple)
     raise UnsafeExpression("reçete beklenmeyen bir değer türü üretti")
 
 
