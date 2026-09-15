@@ -96,6 +96,29 @@ def test_models_dataclasslari_gidis_donus():
     assert type(sonuc["sablon"].parameters[0]) is Parameter
 
 
+def test_v2_models_dataclasslari_gidis_donus():
+    deger = [
+        models.SourceQuestion("s_1", "metin", answer_text="2x", origin="manual",
+                              review_note="not", created_at="2026-09-15"),
+        _sablon(difficulty_estimate=3.5),
+        models.GeneratedQuestion(
+            "q_1", "t_1", {"a": 3}, "metin", "3", "anahtar", "2026-09-15",
+            choices=("3", "4"), correct_index=0, difficulty_estimate=4,
+            student_id="st_1", created_by="u_1", archived=True, similar_given=True,
+        ),
+        Review("q_1", True, 4, 7, "2026-09-15", reviewer_id="u_1"),
+        models.Student("st_1", "Ali", weak_objectives=("k",), level=6,
+                       created_at="2026-09-15", archived=True),
+        models.Exam("ex_1", "Sınav", kind="worksheet", question_ids=("q_1",),
+                    settings={"format": "mc", "n": [1, 2.5, None]}, student_id="st_1",
+                    created_by="u_1", created_at="2026-09-15"),
+        models.FewShotExample("metin", "3", 9, objective="k"),
+    ]
+    _, sonuc, _ = _coz(wire.dumps_ok(deger, retire=False, seq=SIRA))
+    assert sonuc == deger
+    assert [type(s) for s in sonuc] == [type(d) for d in deger]
+
+
 def _models_dataclasslari() -> list[type]:
     return [
         nesne
