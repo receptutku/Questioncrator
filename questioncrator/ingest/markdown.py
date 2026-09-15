@@ -14,7 +14,7 @@ from questioncrator.models import SourceQuestion
 
 # Büyük/küçük harf duyarsız; aksanlı ya da ASCII yazım, sonda isteğe bağlı `:`.
 _HEADING = re.compile(
-    r"^###[ \t]+(Soru|Cevap|[CÇ][oö]z[uü]m|Kazan[ıi]m)[ \t]*:?[ \t]*$",
+    r"^###[ \t]+(Soru|Cevap|[CÇ][oö]z[uü]m|Kazan[ıiIİ]m)[ \t]*:?[ \t]*$",
     re.MULTILINE | re.IGNORECASE,
 )
 _CANONICAL = {"soru": "Soru", "cevap": "Cevap", "cozum": "Çözüm", "kazanim": "Kazanım"}
@@ -22,7 +22,9 @@ _CANONICAL = {"soru": "Soru", "cevap": "Cevap", "cozum": "Çözüm", "kazanim": 
 
 def _canonical(heading: str) -> str:
     """Başlığı aksansız küçük harfe katlayıp standart adına çevirir."""
-    decomposed = unicodedata.normalize("NFD", heading.replace("ı", "i"))
+    # Türkçe İ/ı casefold ile i'ye inmez; önce elle ASCII'ye katlanır.
+    ascii_i = heading.replace("İ", "i").replace("I", "i").replace("ı", "i")
+    decomposed = unicodedata.normalize("NFD", ascii_i)
     folded = "".join(c for c in decomposed if not unicodedata.combining(c)).lower()
     return _CANONICAL[folded]
 

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from questioncrator.ingest import markdown
 
 VERI = Path(__file__).parent / "data" / "ornek_havuz.md"
@@ -83,3 +85,10 @@ def test_buyuk_kucuk_harf_duyarsiz_basliklar():
     assert (soru.text, soru.recipe, soru.answer_text, soru.objective) == (
         "Metin", "2*x", "Açıklama", "k1",
     )
+
+
+@pytest.mark.parametrize("kazanim", ["KAZANİM", "KAZANIM", "Kazanım", "kazanim"])
+def test_turkce_buyuk_i_basligi_taninir(kazanim):
+    icerik = f"### Soru\nMetin\n\n### {kazanim}\nk1\n"
+    (soru,) = markdown.parse_pool(icerik)
+    assert soru.objective == "k1"

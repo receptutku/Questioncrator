@@ -10,9 +10,10 @@ _PLACEHOLDER = re.compile(r"\{(p\d+)\}")
 _COMMAND_END = re.compile(r"\\([A-Za-z]+)$")
 _COMMAND_START = re.compile(r"\\([A-Za-z]+)")
 
-# Yer tutucudan hemen sonra bunlar geliyorsa negatif değer her zaman
-# parantezlenir: `-3^2` -9 okunur, kastedilen (-3)^2'dir.
-_POWER_AFTER = frozenset("^²³!")
+# Yer tutucudan sonra (boşluk atlanarak) bunlar geliyorsa negatif değer
+# her zaman parantezlenir: `-3^2` -9 okunur, kastedilen (-3)^2'dir.
+_SUPERSCRIPT_DIGITS = frozenset("⁰¹²³⁴⁵⁶⁷⁸⁹")
+_GROUP_CLOSERS = ("}", "\\right)")
 # Bunlardan sonra negatif sayı çıplak (`-n`) yazılır.
 _OPENER_CHARS = frozenset("=([{,;$<>|")
 _OPENER_COMMANDS = frozenset({"le", "ge", "leq", "geq"})
@@ -63,6 +64,26 @@ def _is_opener(token: str) -> bool:
     return token in _OPENER_CHARS
 
 
+def _followed_by_power(rest: str) -> bool:
+    """Yer tutucunun ardında kuvvet ya da faktöriyel var mı.
+
+    Boşluklar atlanır; `{{p0}}^2` ve `\\left( {p0} \\right)^2` gibi bir
+    grup kapanışından sonra gelen kuvvet de sayılır.
+    """
+    tail = rest.lstrip(" \t")
+    for closer in _GROUP_CLOSERS:
+        if tail.startswith(closer):
+            tail = tail[len(closer):].lstrip(" \t")
+            break
+    return tail[:1] in ("^", "!") or tail.startswith("**") or tail[:1] in _SUPERSCRIPT_DIGITS
+
+
+def _multiplies_in_recipe(recipe: str, name: str) -> bool:
+    """Reçetede `{pN}*` ardından harf ya da `(` geliyor mu (`**` hariç)."""
+    pattern = r"\{" + re.escape(name) + r"\}\s*\*(?!\*)\s*[A-Za-z(]"
+    return re.search(pattern, recipe) is not None
+
+
 def _drops_unit_coefficient(rest: str) -> bool:
     """1 katsayısı yazılmadan önündeki şeye yapışabilir mi."""
     first = rest[:1]
@@ -78,9 +99,10 @@ def _drops_unit_coefficient(rest: str) -> bool:
     return command.group(1) in _COEFFICIENT_COMMANDS
 
 
-def _append_number(text: str, value: int, rest: str) -> str:
+def _append_number(text: str, value: int, rest: str, unit_coefficient: bool) -> str:
     magnitude = abs(value)
-    digits = "" if magnitude == 1 and _drops_unit_coefficient(rest) else str(magnitude)
+    digits = "" if magnitude == 1 and unit_coefficient else str(magnitude)
+    power = _followed_by_power(rest)
     bare = digits if value >= 0 else "-" + digits
     parenthesized = f"(-{magnitude})"
 
@@ -95,13 +117,13 @@ def _append_number(text: str, value: int, rest: str) -> str:
     if last == "+" and not _ends_with_operand(head):
         at_start = cut == 0 and not head.strip()
         if at_start or _is_opener(_last_token(head.rstrip())):
-            if value < 0 and rest[:1] in _POWER_AFTER:
+            if value < 0 and power:
                 return prefix + head + parenthesized
             return prefix + head + bare
 
     if value >= 0:
         return text + digits
-    if rest[:1] in _POWER_AFTER:
+    if power:
         return text + parenthesized
     if last in ("+", "-"):
         if _ends_with_operand(head):
@@ -124,7 +146,8 @@ def render_text(template: Template, bindings: dict[str, int]) -> str:
     parantezler (LaTeX) olduğu gibi kalır. Metin, reçeteyle matematiksel
     olarak hiçbir zaman çelişmemelidir; sadelik ikinci plandadır:
 
-    - Negatif değer kuvvet/faktöriyel önünde (`^ ² ³ !`) parantezlenir.
+    - Negatif değer kuvvet/faktöriyel önünde (`^`, `**`, üst simge, `!`;
+      boşluk ve `}`/`\\right)` kapanışı atlanarak) parantezlenir.
     - İkili `+`/`-` sonrası işaret sadeleşir (`a + -3` -> `a - 3`,
       `a - -3` -> `a + 3`); işlenensiz tekli eksi ve madde işareti
       korunur (`- (-3)`), açıcı sonrası tekli eksi düşer (`= -{p0}` -> `= 3`).
@@ -132,7 +155,8 @@ def render_text(template: Template, bindings: dict[str, int]) -> str:
     - `^`/`_` sonrası `{-n}`; açıcılar (`= ( [ { , ; $ < > |`, `\\le`,
       `\\ge`) sonrası çıplak `-n`; diğer her yerde `(-n)`.
     - 1 katsayısı yalnız tek harfli değişken, `(` ve izinli LaTeX
-      komutları önünde yazılmaz (`1x` -> `x`, `-1\\sqrt` -> `-\\sqrt`).
+      komutları önünde VE reçetede `{pN}*` ardından harf ya da `(`
+      geliyorsa yazılmaz (`1x` -> `x`); `Boyu 1m` gibi birimler korunur.
     """
     skeleton = template.skeleton
     text = ""
@@ -140,8 +164,12 @@ def render_text(template: Template, bindings: dict[str, int]) -> str:
     for match in _PLACEHOLDER.finditer(skeleton):
         text += skeleton[position:match.start()]
         position = match.end()
-        value = _binding(bindings, match.group(1))
-        text = _append_number(text, value, skeleton[position:])
+        name = match.group(1)
+        rest = skeleton[position:]
+        unit_coefficient = _drops_unit_coefficient(rest) and _multiplies_in_recipe(
+            template.recipe, name
+        )
+        text = _append_number(text, _binding(bindings, name), rest, unit_coefficient)
     return text + skeleton[position:]
 
 

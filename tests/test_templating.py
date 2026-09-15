@@ -18,10 +18,11 @@ def test_katsayilar_parametrelesir():
         "diff(3*x**2 + 5*x - 2, x)",
     )
     t = extract.extract_template(s, "t1")
-    assert t.recipe == "diff({p0}*x**2 + {p1}*x - {p2}, x)"
-    assert t.skeleton == "f(x) = {p0}x^2 + {p1}x - {p2} fonksiyonunun türevini bulunuz."
-    assert [p.name for p in t.parameters] == ["p0", "p1", "p2"]
-    assert t.seed_bindings == {"p0": 3, "p1": 5, "p2": 2}
+    # 2 metinde üs olarak da geçtiği (`x^2`) için tamamen sabit kalır.
+    assert t.recipe == "diff({p0}*x**2 + {p1}*x - 2, x)"
+    assert t.skeleton == "f(x) = {p0}x^2 + {p1}x - 2 fonksiyonunun türevini bulunuz."
+    assert [p.name for p in t.parameters] == ["p0", "p1"]
+    assert t.seed_bindings == {"p0": 3, "p1": 5}
 
 
 def test_us_parametrelesmez():
@@ -85,16 +86,16 @@ def test_render_metin_ve_recete():
 
 
 def test_yildiz_us_gosterimi_metinde_korunur():
-    """`**2` üs gösterimi metinde de yapısaldır; başka bir yerdeki aynı
-    değerli katsayı parametreleşirken üs değişmemelidir."""
+    """`**2` üs gösterimi metinde güvensiz bağlamdır; aynı değerli katsayı
+    da dahil 2 hiçbir yerde parametreleşmez."""
     s = kaynak(
-        "f(x) = x**2 + 2y ifadesidir.",
-        "x**2 + 2*y",
+        "f(x) = x**2 + 2y + 3 ifadesidir.",
+        "x**2 + 2*y + 3",
     )
     t = extract.extract_template(s, "t1")
-    assert t.recipe == "x**2 + {p0}*y"
-    assert t.skeleton == "f(x) = x**2 + {p0}y ifadesidir."
-    assert t.seed_bindings == {"p0": 2}
+    assert t.recipe == "x**2 + 2*y + {p0}"
+    assert t.skeleton == "f(x) = x**2 + 2y + {p0} ifadesidir."
+    assert t.seed_bindings == {"p0": 3}
 
 
 def test_coklu_satir_recete_dogru_degistirilir():
@@ -132,11 +133,41 @@ def test_suslu_us_metinde_parametrelesmez():
 
 
 def test_ayni_sayi_hem_us_hem_katsayi():
-    s = kaynak("$x^{2} + 2x$, x^2 + 2x ve x**2 + 2x", "x**2 + 2*x")
+    """Değer metinde tek bir güvensiz geçişte bile tamamen sabit kalır."""
+    s = kaynak("$x^{2} + 2x + 3$", "x**2 + 2*x + 3")
     t = extract.extract_template(s, "t1")
-    assert t.recipe == "x**2 + {p0}*x"
-    assert t.skeleton == "$x^{2} + {p0}x$, x^2 + {p0}x ve x**2 + {p0}x"
-    assert t.seed_bindings == {"p0": 2}
+    assert t.recipe == "x**2 + 2*x + {p0}"
+    assert t.skeleton == "$x^{2} + 2x + {p0}$"
+
+
+@pytest.mark.parametrize(
+    ("metin", "recete"),
+    [
+        ("$e^{2x}$ türevini bulunuz.", "diff(exp(2*x), x)"),
+        (r"$\sqrt[3]{x} + 3x$", "diff(cbrt(x) + 3*x, x)"),
+        ("$x_{2} + 2$", "2"),
+        ("x² + 2x", "x**2 + 2*x"),
+        ("Bir kalem 2,5 TL", "Rational(5, 2)"),
+        ("Bir kalem 2.5 TL", "Rational(5, 2)"),
+    ],
+)
+def test_guvensiz_baglamdaki_deger_hicbir_yerde_parametrelesmez(metin, recete):
+    with pytest.raises(extract.NoParametersFound):
+        extract.extract_template(kaynak(metin, recete), "t1")
+
+
+def test_baska_sayinin_icinde_gecen_deger_sabit_kalir():
+    """`12` içinde `2` geçtiği için 2 sabit kalır; 12 ayrı ve güvenlidir."""
+    t = extract.extract_template(kaynak("12 elmanın 2 katı", "2*12 - 12"), "t1")
+    assert t.recipe == "2*{p0} - {p0}"
+    assert t.skeleton == "{p0} elmanın 2 katı"
+
+
+def test_metinde_gecmeyen_deger_recetede_parametrelesmez():
+    s = kaynak("Bir şişe 1.5 litre ise 4 şişe kaç litre eder?", "Rational(3, 2)*4")
+    t = extract.extract_template(s, "t1")
+    assert t.recipe == "Rational(3, 2)*{p0}"
+    assert t.skeleton == "Bir şişe 1.5 litre ise {p0} şişe kaç litre eder?"
 
 
 def test_frac_icindeki_sayi_parametrelesmeye_devam_eder():

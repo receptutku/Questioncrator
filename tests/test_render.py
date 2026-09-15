@@ -41,7 +41,7 @@ def test_cift_suslu_icinde_yer_tutucu():
     ],
 )
 def test_isaret_ve_katsayi_sadelesir(degerler, beklenen):
-    t = sablon("f(x) = {p0}x^2 + {p1}x - {p2}")
+    t = sablon("f(x) = {p0}x^2 + {p1}x - {p2}", recete="{p0}*x**2 + {p1}*x - {p2}")
     assert render_text(t, dict(zip(["p0", "p1", "p2"], degerler, strict=True))) == beklenen
 
 
@@ -69,8 +69,9 @@ def test_eksik_baglama_hata_verir():
 
 
 def test_basta_negatif_deger():
-    assert render_text(sablon("{p0}x + 1", 1), {"p0": -5}) == "-5x + 1"
-    assert render_text(sablon("{p0}x + 1", 1), {"p0": -1}) == "-x + 1"
+    t = sablon("{p0}x + 1", 1, recete="{p0}*x + 1")
+    assert render_text(t, {"p0": -5}) == "-5x + 1"
+    assert render_text(t, {"p0": -1}) == "-x + 1"
 
 
 def test_eksi_sonrasi_sifir_oldugu_gibi_yazilir():
@@ -97,6 +98,26 @@ def test_latex_frac_iki_yer_tutucu():
     ],
 )
 def test_kuvvet_ve_faktoriyelde_negatif_parantezlenir(iskelet, beklenen):
+    assert render_text(sablon(iskelet, 1), {"p0": -3}) == beklenen
+
+
+@pytest.mark.parametrize(
+    "iskelet",
+    [
+        "{p0} ^2",
+        "x = {p0}**2",
+        "{p0} ** 2",
+        "{p0}⁴",
+        "{p0}¹",
+        "{p0}⁰ + 1",
+        "{{p0}}^2",
+        "${ {p0} } ^2$",
+        r"\left( {p0} \right)^2",
+        "{p0} !",
+    ],
+)
+def test_kuvvet_bosluk_ve_kapanis_sonrasi_da_gorulur(iskelet):
+    beklenen = iskelet.replace("{p0}", "(-3)")
     assert render_text(sablon(iskelet, 1), {"p0": -3}) == beklenen
 
 
@@ -186,23 +207,42 @@ def test_diger_her_yerde_negatif_parantezlenir(iskelet):
     ],
 )
 def test_bir_katsayi_olmayan_yerde_yazilir(iskelet):
-    assert render_text(sablon(iskelet, 1), {"p0": 1}) == iskelet.replace("{p0}", "1")
+    # Reçete çarpım olsa bile metin kuralı sağlanmadıkça 1 yazılır.
+    t = sablon(iskelet, 1, recete="{p0}*x")
+    assert render_text(t, {"p0": 1}) == iskelet.replace("{p0}", "1")
 
 
 @pytest.mark.parametrize(
-    ("iskelet", "bir", "eksi_bir"),
+    ("iskelet", "recete", "bir", "eksi_bir"),
     [
-        ("{p0}x", "x", "-x"),
-        ("{p0}(x+1)", "(x+1)", "-(x+1)"),
-        (r"{p0}\sqrt{x}", r"\sqrt{x}", r"-\sqrt{x}"),
-        (r"{p0}\sin x", r"\sin x", r"-\sin x"),
-        (r"{p0}\pi", r"\pi", r"-\pi"),
-        (r"{p0}\left(x\right)", r"\left(x\right)", r"-\left(x\right)"),
+        ("{p0}x", "{p0}*x", "x", "-x"),
+        ("{p0}(x+1)", "{p0}*(x+1)", "(x+1)", "-(x+1)"),
+        (r"{p0}\sqrt{x}", "{p0} * sqrt(x)", r"\sqrt{x}", r"-\sqrt{x}"),
+        (r"{p0}\sin x", "{p0}*sin(x)", r"\sin x", r"-\sin x"),
+        (r"{p0}\pi", "{p0}*pi", r"\pi", r"-\pi"),
+        (r"{p0}\left(x\right)", "{p0}*(x)", r"\left(x\right)", r"-\left(x\right)"),
     ],
 )
-def test_bir_katsayi_degisken_ve_izinli_komut_onunde_silinir(iskelet, bir, eksi_bir):
-    assert render_text(sablon(iskelet, 1), {"p0": 1}) == bir
-    assert render_text(sablon(iskelet, 1), {"p0": -1}) == eksi_bir
+def test_bir_katsayi_degisken_ve_izinli_komut_onunde_silinir(iskelet, recete, bir, eksi_bir):
+    t = sablon(iskelet, 1, recete=recete)
+    assert render_text(t, {"p0": 1}) == bir
+    assert render_text(t, {"p0": -1}) == eksi_bir
+
+
+@pytest.mark.parametrize(
+    ("iskelet", "recete", "eksi_bir"),
+    [
+        ("Boyu {p0}m", "{p0}", "Boyu (-1)m"),
+        ("{p0}g un", "{p0}*1000", "-1g un"),
+        ("{p0}x", "{p0} + x", "-1x"),
+        ("{p0}x", "{p0}**x", "-1x"),
+        ("{p0}x", "x/{p0}", "-1x"),
+    ],
+)
+def test_bir_katsayi_recete_carpim_degilse_yazilir(iskelet, recete, eksi_bir):
+    t = sablon(iskelet, 1, recete=recete)
+    assert render_text(t, {"p0": 1}) == iskelet.replace("{p0}", "1")
+    assert render_text(t, {"p0": -1}) == eksi_bir
 
 
 def test_eksi_bir_birim_onunde_yazilir():
