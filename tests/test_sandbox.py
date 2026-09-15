@@ -113,8 +113,17 @@ def test_aktarilamayan_sonuc_crashed_olur(surec_kipi):
 
 
 def test_paket_disi_istisna_turu_aktarilmaz(surec_kipi):
-    with pytest.raises(sandbox.SandboxCrashed, match="sonuç türü aktarılamaz"):
+    with pytest.raises(sandbox.SandboxCrashed, match="paket dışı istisna"):
         sandbox.run(yabanci_hata_firlat, timeout=20)
+
+
+def dur_firlat() -> None:
+    raise StopIteration("dur")
+
+
+def test_stopiteration_yeniden_yukseltilmez(surec_kipi):
+    with pytest.raises(sandbox.SandboxCrashed):
+        sandbox.run(dur_firlat, timeout=20)
 
 
 def test_isci_cokerse_hata_verir_ve_toparlanir(surec_kipi):
@@ -172,56 +181,16 @@ def test_sympy_sonucu_ebeveynde_acilmaz(surec_kipi):
     assert sandbox.run(pow, 2, 4, timeout=20) == 16
 
 
-class _SistemYuku:
-    def __init__(self, yol: str) -> None:
-        self.yol = yol
-
-    def __reduce__(self):
-        return (os.system, (f"touch {self.yol}",))
+def kume_dondur() -> object:
+    return {1, 2}
 
 
-class _EvalYuku:
-    def __init__(self, yol: str) -> None:
-        self.yol = yol
-
-    def __reduce__(self):
-        return (eval, (f"open({self.yol!r}, 'w').close()",))
-
-
-class _DevBaytYuku:
-    def __reduce__(self):
-        return (bytes, (10**10,))
-
-
-def sistem_yuku_dondur(yol: str) -> object:
-    return _SistemYuku(yol)
-
-
-def eval_yuku_dondur(yol: str) -> object:
-    return _EvalYuku(yol)
-
-
-def dev_bayt_yuku_dondur() -> object:
-    return _DevBaytYuku()
-
-
-def yuk_istisnada_dondur(yol: str) -> None:
-    raise ValueError(_SistemYuku(yol))
-
-
-@pytest.mark.parametrize("uretici", [sistem_yuku_dondur, eval_yuku_dondur, yuk_istisnada_dondur])
-def test_reduce_yuku_ebeveynde_calismaz(surec_kipi, tmp_path, uretici):
-    hedef = tmp_path / "calisti"
-    with pytest.raises(sandbox.SandboxCrashed):
-        sandbox.run(uretici, str(hedef), timeout=30)
-    assert not hedef.exists()
-
-
-def test_bayt_yuku_bellek_sisirmez(surec_kipi):
-    baslangic = time.monotonic()
-    with pytest.raises(sandbox.SandboxCrashed):
-        sandbox.run(dev_bayt_yuku_dondur, timeout=30)
-    assert time.monotonic() - baslangic < 5
+def test_desteklenmeyen_sonuc_turu_isciyi_yeniler(surec_kipi, monkeypatch):
+    monkeypatch.setenv("QC_SANDBOX_WORKERS", "1")
+    eski = sandbox.run(os.getpid, timeout=30)
+    with pytest.raises(sandbox.SandboxCrashed, match="sonuç türü aktarılamaz: builtins.set"):
+        sandbox.run(kume_dondur, timeout=30)
+    assert sandbox.run(os.getpid, timeout=30) != eski
 
 
 def model_ve_kaplar_dondur() -> object:
@@ -235,18 +204,94 @@ def model_ve_kaplar_dondur() -> object:
     )
     kaplar = {
         "liste": [1, 2.5, (3, None), True],
-        "kume": {1, 2},
-        "donuk": frozenset({"x"}),
-        "karmasik": complex(1, -2),
-        "bayt": b"\x00\x01",
         "ic": {"derin": [[{"k": (1,)}]]},
         "buyuk": 10**40,
+        "metin": 'tırnak " ve [ { \\',
     }
     return (sablon, kaplar)
 
 
 def test_model_ve_ic_ice_ilkel_kaplar_doner(surec_kipi):
     assert sandbox.run(model_ve_kaplar_dondur, timeout=30) == model_ve_kaplar_dondur()
+
+
+# --- Elle yazılmış işçi davranışları (çerçeve düzeyi) ---------------------
+
+
+def _cerceve(govde: bytes) -> bytes:
+    return len(govde).to_bytes(8, "big") + govde
+
+
+def ham_yaz_ve_uyu(veri: bytes) -> None:
+    """İşçi kanalına elle bayt yazar ve bekler (kötü niyetli işçi taklidi)."""
+    kalan = memoryview(veri)
+    while kalan:
+        kalan = kalan[os.write(sandbox._WORKER_FD, kalan) :]
+    time.sleep(30)
+
+
+def test_kismi_cerceve_suresiz_bloklamaz(surec_kipi):
+    sandbox.run(pow, 1, 1, timeout=30)
+    baslangic = time.monotonic()
+    with pytest.raises(sandbox.SandboxTimeout):
+        sandbox.run(ham_yaz_ve_uyu, _cerceve(b'{"status":"ok"')[:9], timeout=1)
+    assert time.monotonic() - baslangic < 3
+    assert sandbox.run(pow, 2, 2, timeout=30) == 4
+
+
+def test_kismi_baslik_suresiz_bloklamaz(surec_kipi):
+    sandbox.run(pow, 1, 1, timeout=30)
+    baslangic = time.monotonic()
+    with pytest.raises(sandbox.SandboxTimeout):
+        sandbox.run(ham_yaz_ve_uyu, b"\x00\x00\x00", timeout=1)
+    assert time.monotonic() - baslangic < 3
+
+
+def test_baslikta_buyuk_uzunluk_okunmadan_reddedilir(surec_kipi, monkeypatch):
+    monkeypatch.setenv("QC_SANDBOX_WORKERS", "1")
+    eski = sandbox.run(os.getpid, timeout=30)
+    baslangic = time.monotonic()
+    with pytest.raises(sandbox.SandboxCrashed):
+        sandbox.run(ham_yaz_ve_uyu, (2**40).to_bytes(8, "big"), timeout=10)
+    assert time.monotonic() - baslangic < 3
+    assert sandbox.run(os.getpid, timeout=30) != eski
+
+
+@pytest.mark.parametrize(
+    "govde",
+    [
+        b'{"status":"ok","status":"ok","value":1,"retire":false}',
+        b'{"status":"ok","value":' + b"9" * 5000 + b',"retire":false}',
+        b'{"status":"ok","value":' + b"[" * 100 + b"]" * 100 + b',"retire":false}',
+        b'{"status":"ok","value":{"$zz":1},"retire":false}',
+        b'{"status":"ok","value":{"$m":["Parameter",{"$d":{"__init__":1}}]},"retire":false}',
+        b"\x80\x04N.",
+    ],
+)
+def test_kotu_yanit_crashed_olur_ve_isci_yenilenir(surec_kipi, monkeypatch, govde):
+    monkeypatch.setenv("QC_SANDBOX_WORKERS", "1")
+    eski = sandbox.run(os.getpid, timeout=30)
+    baslangic = time.monotonic()
+    with pytest.raises(sandbox.SandboxCrashed):
+        sandbox.run(ham_yaz_ve_uyu, _cerceve(govde), timeout=10)
+    assert time.monotonic() - baslangic < 3
+    assert sandbox.run(os.getpid, timeout=30) != eski
+    assert Parameter("a", 1, 9).high == 9
+
+
+def test_ebeveynde_pickle_acma_yok():
+    import inspect
+
+    from questioncrator import wire
+
+    for modul in (sandbox, wire):
+        kaynak = inspect.getsource(modul)
+        for yasak in ("pickle.loads", "Unpickler", "ForkingPickler.loads", "recv_bytes"):
+            assert yasak not in kaynak, (modul.__name__, yasak)
+    # İşçi→ebeveyn yönü JSON; `conn.recv()` yalnız işçide (güvenilir ebeveynin
+    # isteğini açmak için) kullanılır.
+    assert inspect.getsource(sandbox).count(".recv(") == 1
+    assert ".recv(" in inspect.getsource(sandbox._serve)
 
 
 def buyuk_metin_dondur(boyut: int) -> str:
