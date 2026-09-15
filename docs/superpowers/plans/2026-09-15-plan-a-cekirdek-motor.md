@@ -337,6 +337,25 @@ def test_isci_cokerse_hata_verir_ve_toparlanir(surec_kipi):
 def test_inline_kip_ayni_surecte_calisir(monkeypatch):
     monkeypatch.setenv("QC_SANDBOX", "inline")
     assert sandbox.run(os.getpid, timeout=1) == os.getpid()
+
+
+def guvensiz_recete_dener(recete: str) -> str:
+    """İşçi süreçte çalışır: reçete reddedilirse istisna adını döndürür."""
+    from questioncrator.mathenv import parse
+
+    try:
+        parse(recete)
+    except Exception as exc:  # noqa: BLE001 — istisna adı ebeveyne taşınıyor
+        return type(exc).__name__
+    return "ISTISNA_YOK"
+
+
+def test_isci_surecte_recete_bekcileri_etkin(surec_kipi):
+    # Task 1'in sertleştirmesi işçi süreçte de kurulu olmalı: guard'lar
+    # `questioncrator.mathenv` import edilirken kurulur, fork edilen işçide de.
+    assert sandbox.run(guvensiz_recete_dener, 'sympify("x")', timeout=30) == "UnsafeExpression"
+    assert sandbox.run(guvensiz_recete_dener, "nsolve(sin(x)-1, x, 1)", timeout=30) == "UnsafeExpression"
+    assert sandbox.run(guvensiz_recete_dener, "diff(3*x**2, x)", timeout=30) == "ISTISNA_YOK"
 ```
 
 - [ ] **Adım 2: Başarısız olduğunu doğrula**
@@ -511,7 +530,7 @@ Not (uygulayıcıya): İşçi `_serve` sonucu gönderip `threading.active_count(
 - [ ] **Adım 4: Testleri çalıştır**
 
 Run: `.venv/bin/pytest tests/test_sandbox.py -q && .venv/bin/pytest -q && .venv/bin/ruff check .`
-Expected: 6 passed; tüm paket yeşil.
+Expected: 7 passed; tüm paket yeşil.
 
 - [ ] **Adım 5: Commit**
 
