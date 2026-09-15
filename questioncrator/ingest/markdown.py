@@ -7,11 +7,24 @@ bu modülün yanına kardeş modüller olarak eklenir; arayüz aynı kalır.
 from __future__ import annotations
 
 import re
+import unicodedata
 from pathlib import Path
 
 from questioncrator.models import SourceQuestion
 
-_HEADING = re.compile(r"^###\s+(Soru|Cevap|Çözüm|Kazanım)\s*$", re.MULTILINE)
+# Büyük/küçük harf duyarsız; aksanlı ya da ASCII yazım, sonda isteğe bağlı `:`.
+_HEADING = re.compile(
+    r"^###[ \t]+(Soru|Cevap|[CÇ][oö]z[uü]m|Kazan[ıi]m)[ \t]*:?[ \t]*$",
+    re.MULTILINE | re.IGNORECASE,
+)
+_CANONICAL = {"soru": "Soru", "cevap": "Cevap", "cozum": "Çözüm", "kazanim": "Kazanım"}
+
+
+def _canonical(heading: str) -> str:
+    """Başlığı aksansız küçük harfe katlayıp standart adına çevirir."""
+    decomposed = unicodedata.normalize("NFD", heading.replace("ı", "i"))
+    folded = "".join(c for c in decomposed if not unicodedata.combining(c)).lower()
+    return _CANONICAL[folded]
 
 
 def _parse_block(block: str) -> dict[str, str]:
@@ -20,7 +33,7 @@ def _parse_block(block: str) -> dict[str, str]:
     # split sonucu: [önsöz, başlık1, gövde1, başlık2, gövde2, ...]
     fields: dict[str, str] = {}
     for i in range(1, len(parts) - 1, 2):
-        fields[parts[i]] = parts[i + 1].strip()
+        fields[_canonical(parts[i])] = parts[i + 1].strip()
     return fields
 
 
@@ -32,8 +45,10 @@ def parse_pool(content: str) -> list[SourceQuestion]:
     yoksa blok atlanır. `### Cevap` yoksa soru `needs_review=True` ile
     kaydedilir (elle kontrol listesine düşer). `### Çözüm` gövdesi
     (varsa) insan tarafından okunacak çözüm metni olarak `answer_text`'e
-    yazılır; reçete yerine geçmez.
+    yazılır; reçete yerine geçmez. Başlıklar büyük/küçük harf ve aksandan
+    bağımsızdır (`### cozum:` da olur); içerik önce NFC'ye normalleştirilir.
     """
+    content = unicodedata.normalize("NFC", content)
     questions: list[SourceQuestion] = []
     for block in re.split(r"^---\s*$", content, flags=re.MULTILINE):
         fields = _parse_block(block)

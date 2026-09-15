@@ -120,3 +120,26 @@ def test_render_recete_negatif_degeri_parantezler():
         seed_answer_ops=1,
     )
     assert mathenv.parse(render.render_recipe(t, {"p0": -3})) == 9
+
+
+def test_suslu_us_metinde_parametrelesmez():
+    """`x^{2}` içindeki üs yapısaldır; reçetede `**2` parametreleşmediği gibi
+    metinde de parametreleşmemelidir."""
+    s = kaynak("$x^{2} + 3x$ ifadesi", "x**2 + 3*x")
+    t = extract.extract_template(s, "t1")
+    assert t.recipe == "x**2 + {p0}*x"
+    assert t.skeleton == "$x^{2} + {p0}x$ ifadesi"
+
+
+def test_ayni_sayi_hem_us_hem_katsayi():
+    s = kaynak("$x^{2} + 2x$, x^2 + 2x ve x**2 + 2x", "x**2 + 2*x")
+    t = extract.extract_template(s, "t1")
+    assert t.recipe == "x**2 + {p0}*x"
+    assert t.skeleton == "$x^{2} + {p0}x$, x^2 + {p0}x ve x**2 + {p0}x"
+    assert t.seed_bindings == {"p0": 2}
+
+
+def test_frac_icindeki_sayi_parametrelesmeye_devam_eder():
+    s = kaynak(r"$\frac{3}{x^{2}}$", "3/x**2")
+    t = extract.extract_template(s, "t1")
+    assert t.skeleton == r"$\frac{{p0}}{x^{2}}$"

@@ -58,3 +58,28 @@ def test_cozum_basligi_answer_text_olur():
     assert soru.answer_text == "Cevap 2x olur."
     assert soru.recipe == "2*x"
     assert soru.origin == "markdown"
+
+
+def test_nfd_cozum_basligi_taninir():
+    import unicodedata
+
+    baslik = unicodedata.normalize("NFD", "Çözüm")
+    icerik = f"### Soru\nMetin\n\n### Cevap\n2*x\n\n### {baslik}\nAçıklama\n"
+    (soru,) = markdown.parse_pool(icerik)
+    assert soru.answer_text == "Açıklama"
+
+
+def test_ascii_ve_iki_noktali_basliklar_taninir():
+    icerik = "### Soru:\nMetin\n\n### Cevap:\n2*x\n\n### Cozum:\nAçıklama\n\n### Kazanim:\nk1\n"
+    (soru,) = markdown.parse_pool(icerik)
+    assert (soru.text, soru.recipe, soru.answer_text, soru.objective) == (
+        "Metin", "2*x", "Açıklama", "k1",
+    )
+
+
+def test_buyuk_kucuk_harf_duyarsiz_basliklar():
+    icerik = "### soru\nMetin\n\n### cevap\n2*x\n\n### ÇÖZÜM\nAçıklama\n\n### KAZANIM\nk1\n"
+    (soru,) = markdown.parse_pool(icerik)
+    assert (soru.text, soru.recipe, soru.answer_text, soru.objective) == (
+        "Metin", "2*x", "Açıklama", "k1",
+    )
