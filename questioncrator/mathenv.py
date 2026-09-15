@@ -8,6 +8,7 @@ kadar geniş kalır ama Python'un geri kalanına erişemez.
 
 from __future__ import annotations
 
+import contextvars
 import functools
 import io
 import keyword
@@ -18,7 +19,15 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
 
 import sympy
-from sympy.parsing.sympy_parser import parse_expr, standard_transformations
+import sympy.parsing.sympy_parser as _sympy_parser
+from sympy.parsing.sympy_parser import standard_transformations
+
+# `parse_expr`in özgün (sarmalanmamış) başvurusu: kendi değerlendirmemizi
+# bununla yaparız. Modül düzeyindeki `_sympy_parser.parse_expr` ise aşağıda
+# bir muhafızla değiştirilir; sympy'nin kendi `sympify`i çağrı anında o
+# modül niteliğini içe aktardığından, ikinci bir eval açan her dolaylı yol
+# muhafıza takılır.
+_original_parse_expr = _sympy_parser.parse_expr
 
 
 class UnsafeExpression(ValueError):
@@ -41,6 +50,14 @@ DENIED_NAMES = frozenset(
         "interactive_traversal", "textplot", "dotprint", "test", "doctest",
         "exec", "eval", "open", "compile", "getattr", "setattr", "delattr",
         "globals", "locals", "vars", "input", "help", "breakpoint", "exit", "quit",
+        # Dizge üreten yazıcılar/işlevler: çıktıları çalışma anında birleşip
+        # ikinci bir eval'a beslenebilir, bu yüzden reçetede kullanılamaz.
+        "srepr", "sstr", "sstrrepr", "latex", "multiline_latex", "mathml",
+        "pretty", "python", "pycode", "ccode", "cxxcode", "fcode", "jscode",
+        "julia_code", "maple_code", "mathematica_code", "octave_code", "rcode",
+        "rust_code", "glsl_code", "smtlib_code", "print_tree",
+        # `.name` gibi dizge döndüren nitelikler reçetede gereksizdir.
+        "name",
     }
 )  # fmt: skip
 DENIED_PREFIXES = ("_", "plot", "print_", "pprint")
@@ -101,20 +118,59 @@ def _allowed_namespace() -> dict[str, object]:
     return ns
 
 
+# Bir reçete değerlendirilirken (yalnız kendi iş parçacığında) True olur.
+# `parse` bunu ayarlar; muhafız buna bakar.
+_evaluating_recipe: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "qc_evaluating_recipe", default=False
+)
+
+
+@functools.wraps(_original_parse_expr)
+def _guarded_parse_expr(*args: object, **kwargs: object) -> object:
+    """`sympy.parsing.sympy_parser.parse_expr` yerine geçen muhafız.
+
+    Reçete değerlendirilirken sympy'nin herhangi bir dolaylı yolu (örn.
+    `sympify(<dizge>)` ya da `simplify(<dizge>)`) bir dizgeyi yeniden
+    ayrıştırmaya kalkarsa, o ikinci eval'ı burada durdururuz. Kendi
+    `parse`imiz özgün başvuruyu (`_original_parse_expr`) doğrudan çağırır.
+    """
+    if _evaluating_recipe.get():
+        raise UnsafeExpression("reçete değerlendirilirken dizge ayrıştırma reddedildi")
+    return _original_parse_expr(*args, **kwargs)
+
+
+def _install_parse_guard() -> None:
+    """Muhafızı bir kez, yeniden çalıştırmaya dayanıklı biçimde kurar."""
+    if getattr(_sympy_parser.parse_expr, "_qc_guard", False):
+        return
+    _guarded_parse_expr._qc_guard = True  # type: ignore[attr-defined]
+    _sympy_parser.parse_expr = _guarded_parse_expr
+
+
+_install_parse_guard()
+
+
 def _normalize(value: object) -> sympy.Basic:
     """SymPy'nin Basic olmayan dönüşlerini Basic'e çevirir.
 
     Bazı sympy çağrıları düz Python listesi ya da değişebilir bir kap
-    nesnesi döndürür. Boru hattının geri kalanı her yerde `Basic` bekler
-    (`count_ops`, `srepr`, `latex`), bu yüzden tek noktada normalleştiririz.
+    nesnesi döndürür. Boru hattının geri kalanı her yerde `Basic` bekler,
+    bu yüzden tek noktada normalleştiririz. Yalnız sayı, `Basic`, `MatrixBase`
+    ve bunların list/tuple/set kümeleri kabul edilir; dizge (str/bytes) ya da
+    başka bir Python nesnesi asla `sympify`e verilmez — aksi halde çalışma
+    anında kurulmuş bir dizge ikinci bir eval'a sızabilirdi.
     """
+    if isinstance(value, (str, bytes, bytearray)):
+        raise UnsafeExpression("reçete metin değeri üretemez")
     if isinstance(value, sympy.matrices.MatrixBase):
         return sympy.ImmutableMatrix(value)
     if isinstance(value, (list, tuple, set)):
         return sympy.Tuple(*[_normalize(v) for v in value])
     if isinstance(value, sympy.Basic):
         return value
-    return sympy.sympify(value)
+    if isinstance(value, (bool, int, float, complex)):
+        return sympy.sympify(value)
+    raise UnsafeExpression("reçete beklenmeyen bir değer türü üretti")
 
 
 def parse(recipe: str) -> sympy.Basic:
@@ -128,13 +184,18 @@ def parse(recipe: str) -> sympy.Basic:
     if "import" in recipe:
         raise UnsafeExpression("`import` içeren ifade reddedildi")
     check_recipe(recipe)
-    return _normalize(
-        parse_expr(
+    # Bayrağı `parse` içinde ayarlarız ki `parse_with_timeout`un işçi
+    # iş parçacığında da geçerli olsun (ContextVar iş parçacığına özeldir).
+    token = _evaluating_recipe.set(True)
+    try:
+        result = _original_parse_expr(
             recipe,
             global_dict=_allowed_namespace(),
             transformations=standard_transformations,
         )
-    )
+    finally:
+        _evaluating_recipe.reset(token)
+    return _normalize(result)
 
 
 def parse_with_timeout(recipe: str, seconds: float = 5.0) -> sympy.Basic:

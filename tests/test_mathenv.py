@@ -129,9 +129,10 @@ def test_ad_alaninda_modul_ve_yasakli_ad_yok():
 
 def test_modul_adi_otomatik_sembole_duser_ve_alt_modul_erisilemez():
     # `utilities` bir sympy modülüdür; ad alanında olmadığı için Symbol olur.
-    with pytest.raises(Exception) as bilgi:
-        mathenv.parse("utilities.lambdify")
-    assert not isinstance(bilgi.value, SystemExit)
+    # Symbol'ün `solveset` niteliği yoktur, bu yüzden gerçek Python kodu değil
+    # somut bir `AttributeError` çıkar (SystemExit ya da başka bir kaçış değil).
+    with pytest.raises(AttributeError):
+        mathenv.parse("utilities.solveset")
 
 
 @pytest.mark.parametrize(
@@ -149,3 +150,58 @@ def test_modul_adi_otomatik_sembole_duser_ve_alt_modul_erisilemez():
 )
 def test_mesru_receteler_calismaya_devam_eder(recete):
     mathenv.parse(recete)
+
+
+# Çalışma anında dizge kuran, tırnaksız kaçış: `Symbol.name` / `srepr(...)`
+# Python `str` döndürür; indeksleme + birleştirme ile "__import__('os')..."
+# kurulur, `parse_expr` bunu `str` olarak döndürür ve eski `_normalize`
+# `sympify(str)` çağırarak sympy'nin builtins'li ikinci eval'ını açardı.
+_RCE_PAYLOAD = (
+    "a_b.name[1] + a_b.name[1] + imp.name + ort.name + a_b.name[1] + a_b.name[1]"
+    " + srepr(x)[6] + srepr(x)[7] + os.name + srepr(x)[7] + srepr(x)[10]"
+    " + srepr(Float(1.5))[8] + getcwd.name + srepr(x)[6] + srepr(x)[10]"
+)
+
+
+def test_calisma_aninda_dizge_kuran_kacis_reddedilir():
+    with pytest.raises(mathenv.UnsafeExpression):
+        mathenv.parse(_RCE_PAYLOAD)
+
+
+def test_kacis_simplify_varyanti_da_reddedilir():
+    with pytest.raises(mathenv.UnsafeExpression):
+        mathenv.parse("simplify(" + _RCE_PAYLOAD + ")")
+
+
+def test_normalize_dizge_uretmeyi_reddeder():
+    # Katman (a): `_normalize` hiçbir koşulda bir dizgeyi sympify'a vermez.
+    with pytest.raises(mathenv.UnsafeExpression):
+        mathenv._normalize("__import__('os')")
+    with pytest.raises(mathenv.UnsafeExpression):
+        mathenv._normalize(b"kod")
+
+
+def test_parse_asla_dizge_dondurmez():
+    sonuc = mathenv.parse("x + 1")
+    assert isinstance(sonuc, sympy.Basic)
+    assert not isinstance(sonuc, (str, bytes))
+
+
+def test_degerlendirme_bayragi_icinde_sympify_dizge_ayristiramaz(tmp_path):
+    # Katman (b): reçete değerlendirme bayrağı açıkken sympy'nin kendi
+    # `sympify`i bir dizgeyi yeniden ayrıştıramaz; kod çalışmadan durur.
+    hedef = tmp_path / "izi_b"
+    kotu = "__import__('os').mkdir('" + str(hedef) + "')"
+    jeton = mathenv._evaluating_recipe.set(True)
+    try:
+        with pytest.raises(mathenv.UnsafeExpression):
+            sympy.sympify(kotu)
+    finally:
+        mathenv._evaluating_recipe.reset(jeton)
+    assert not hedef.exists()
+
+
+def test_bayrak_disinda_sympify_normal_calisir():
+    # Küresel sarmalayıcı uygulamanın kendi `sympify` çağrılarını bozmamalı.
+    assert not mathenv._evaluating_recipe.get()
+    assert sympy.sympify("x + 1") == sympy.Symbol("x") + 1
