@@ -1,16 +1,26 @@
 from __future__ import annotations
 
+import multiprocessing
 import os
 import sys
+import threading
 import time
 
 import pytest
 
 from questioncrator import sandbox
+from questioncrator.mathenv import UnsafeExpression, parse, parse_with_timeout
+from questioncrator.models import Parameter, Template
 
 linux_gerekir = pytest.mark.skipif(
     not sys.platform.startswith("linux"), reason="RLIMIT_AS yalnız Linux'ta uygulanır"
 )
+
+# Linux bellek testlerinde 256 MB yerine 512 MB: RLIMIT_AS sanal adres alanını
+# sınırlar; önyüklenmiş sympy eşlemeleri, iş parçacığı yığınları (8 MB) ve glibc
+# iş parçacığı arenaları (64 MB'a kadar ayrılmış alan) sağlıklı işlerde bile
+# 256 MB'a yaklaşır ve `can't start new thread` ile yanlış pozitif üretebilir.
+LINUX_TEST_BELLEK_MB = "512"
 
 
 @pytest.fixture
@@ -44,15 +54,34 @@ def test_zaman_asiminda_isci_oldurulur_ve_yenilenir(surec_kipi):
     assert sandbox.run(pow, 3, 2, timeout=20) == 9
 
 
+def test_pozitif_olmayan_sure_reddedilir(surec_kipi):
+    with pytest.raises(ValueError):
+        sandbox.run(pow, 2, 2, timeout=0)
+    with pytest.raises(ValueError):
+        sandbox.run(pow, 2, 2, timeout=-1)
+
+
+def test_havuz_kurulumu_sureye_dahildir(surec_kipi):
+    with pytest.raises(sandbox.SandboxTimeout):
+        sandbox.run(pow, 2, 2, timeout=1e-6)
+    assert sandbox.run(pow, 2, 2, timeout=20) == 4
+
+
 def test_istisna_aynen_yukselir(surec_kipi):
     with pytest.raises(ValueError):
         sandbox.run(int, "sayi-degil", timeout=20)
 
 
+def test_paket_istisnasi_aynen_yukselir(surec_kipi):
+    with pytest.raises(UnsafeExpression) as bilgi:
+        sandbox.run(parse, 'sympify("x")', timeout=30)
+    assert type(bilgi.value) is UnsafeExpression
+
+
 class _AktarilamayanHata(Exception):
     def __init__(self) -> None:
         super().__init__("aktarılamaz")
-        self.kilit = __import__("threading").Lock()
+        self.kilit = threading.Lock()
 
 
 def aktarilamayan_hata_firlat() -> None:
@@ -60,9 +89,15 @@ def aktarilamayan_hata_firlat() -> None:
 
 
 def aktarilamayan_sonuc_dondur() -> object:
-    import threading
-
     return threading.Lock()
+
+
+class _YabanciHata(Exception):
+    pass
+
+
+def yabanci_hata_firlat() -> None:
+    raise _YabanciHata("paket dışı istisna")
 
 
 def test_aktarilamayan_istisna_crashed_olur(surec_kipi):
@@ -77,6 +112,11 @@ def test_aktarilamayan_sonuc_crashed_olur(surec_kipi):
     assert sandbox.run(pow, 2, 6, timeout=20) == 64
 
 
+def test_paket_disi_istisna_turu_aktarilmaz(surec_kipi):
+    with pytest.raises(sandbox.SandboxCrashed, match="sonuç türü aktarılamaz"):
+        sandbox.run(yabanci_hata_firlat, timeout=20)
+
+
 def test_isci_cokerse_hata_verir_ve_toparlanir(surec_kipi):
     with pytest.raises(sandbox.SandboxCrashed):
         sandbox.run(os._exit, 3, timeout=20)
@@ -84,8 +124,6 @@ def test_isci_cokerse_hata_verir_ve_toparlanir(surec_kipi):
 
 
 def kacak_is_parcacigi_birakir() -> int:
-    import threading
-
     threading.Thread(target=time.sleep, args=(30,), daemon=True).start()
     return os.getpid()
 
@@ -100,9 +138,173 @@ def test_kacak_is_parcacigi_birakan_isci_yenilenir(surec_kipi, monkeypatch):
     assert sandbox.run(os.getpid, timeout=20) == yeni
 
 
+def sureli_ayristir_pid(recete: str) -> int:
+    parse_with_timeout(recete, 5.0)
+    return os.getpid()
+
+
+def test_sureli_ayristirma_isciyi_emekli_etmez(surec_kipi, monkeypatch):
+    monkeypatch.setenv("QC_SANDBOX_WORKERS", "1")
+    pidler = {sandbox.run(sureli_ayristir_pid, "diff(3*x**2, x)", timeout=30) for _ in range(5)}
+    assert len(pidler) == 1
+
+
 def test_inline_kip_ayni_surecte_calisir(monkeypatch):
     monkeypatch.setenv("QC_SANDBOX", "inline")
     assert sandbox.run(os.getpid, timeout=1) == os.getpid()
+
+
+# --- Aktarım güvenliği ---------------------------------------------------
+
+
+def ayristirma_sonucu_dondur(recete: str) -> object:
+    return parse(recete)
+
+
+def test_sympy_sonucu_ebeveynde_acilmaz(surec_kipi):
+    sandbox.run(pow, 1, 1, timeout=30)  # işçiyi ısıt
+    baslangic = time.monotonic()
+    with pytest.raises(sandbox.SandboxCrashed, match="sonuç türü aktarılamaz: sympy"):
+        sandbox.run(ayristirma_sonucu_dondur, "Pow(10, 10**8, evaluate=False)", timeout=30)
+    assert time.monotonic() - baslangic < 2
+    with pytest.raises(sandbox.SandboxCrashed, match="sonuç türü aktarılamaz: sympy"):
+        sandbox.run(ayristirma_sonucu_dondur, "diff(3*x**2, x)", timeout=30)
+    assert sandbox.run(pow, 2, 4, timeout=20) == 16
+
+
+class _SistemYuku:
+    def __init__(self, yol: str) -> None:
+        self.yol = yol
+
+    def __reduce__(self):
+        return (os.system, (f"touch {self.yol}",))
+
+
+class _EvalYuku:
+    def __init__(self, yol: str) -> None:
+        self.yol = yol
+
+    def __reduce__(self):
+        return (eval, (f"open({self.yol!r}, 'w').close()",))
+
+
+class _DevBaytYuku:
+    def __reduce__(self):
+        return (bytes, (10**10,))
+
+
+def sistem_yuku_dondur(yol: str) -> object:
+    return _SistemYuku(yol)
+
+
+def eval_yuku_dondur(yol: str) -> object:
+    return _EvalYuku(yol)
+
+
+def dev_bayt_yuku_dondur() -> object:
+    return _DevBaytYuku()
+
+
+def yuk_istisnada_dondur(yol: str) -> None:
+    raise ValueError(_SistemYuku(yol))
+
+
+@pytest.mark.parametrize("uretici", [sistem_yuku_dondur, eval_yuku_dondur, yuk_istisnada_dondur])
+def test_reduce_yuku_ebeveynde_calismaz(surec_kipi, tmp_path, uretici):
+    hedef = tmp_path / "calisti"
+    with pytest.raises(sandbox.SandboxCrashed):
+        sandbox.run(uretici, str(hedef), timeout=30)
+    assert not hedef.exists()
+
+
+def test_bayt_yuku_bellek_sisirmez(surec_kipi):
+    baslangic = time.monotonic()
+    with pytest.raises(sandbox.SandboxCrashed):
+        sandbox.run(dev_bayt_yuku_dondur, timeout=30)
+    assert time.monotonic() - baslangic < 5
+
+
+def model_ve_kaplar_dondur() -> object:
+    sablon = Template(
+        id="t_1",
+        source_id="s_1",
+        skeleton="{a} + {b}",
+        recipe="a + b",
+        parameters=(Parameter("a", 1, 9), Parameter("b", 2, 8, exclude=(0, 5))),
+        seed_bindings={"a": 3, "b": 4},
+    )
+    kaplar = {
+        "liste": [1, 2.5, (3, None), True],
+        "kume": {1, 2},
+        "donuk": frozenset({"x"}),
+        "karmasik": complex(1, -2),
+        "bayt": b"\x00\x01",
+        "ic": {"derin": [[{"k": (1,)}]]},
+        "buyuk": 10**40,
+    }
+    return (sablon, kaplar)
+
+
+def test_model_ve_ic_ice_ilkel_kaplar_doner(surec_kipi):
+    assert sandbox.run(model_ve_kaplar_dondur, timeout=30) == model_ve_kaplar_dondur()
+
+
+def buyuk_metin_dondur(boyut: int) -> str:
+    return "x" * boyut
+
+
+def test_sonuc_boyut_siniri_iscide_uygulanir(surec_kipi, monkeypatch):
+    monkeypatch.setenv("QC_SANDBOX_WORKERS", "1")
+    monkeypatch.setenv("QC_SANDBOX_MAX_RESULT_MB", "1")
+    eski = sandbox.run(os.getpid, timeout=30)
+    with pytest.raises(sandbox.SandboxCrashed):
+        sandbox.run(buyuk_metin_dondur, 2 * 1024 * 1024, timeout=30)
+    assert sandbox.run(os.getpid, timeout=30) != eski
+    assert sandbox.run(buyuk_metin_dondur, 10, timeout=30) == "x" * 10
+
+
+def test_sonuc_boyut_siniri_ebeveynde_de_uygulanir(surec_kipi, monkeypatch):
+    monkeypatch.setenv("QC_SANDBOX_WORKERS", "1")
+    eski = sandbox.run(os.getpid, timeout=30)
+    # İşçi 16 MB sınırıyla açıldı; ebeveyn tarafını tek başına daraltıyoruz.
+    sandbox._pool().max_result_bytes = 64 * 1024
+    with pytest.raises(sandbox.SandboxCrashed):
+        sandbox.run(buyuk_metin_dondur, 256 * 1024, timeout=30)
+    assert sandbox.run(os.getpid, timeout=30) != eski
+
+
+# --- Kapatma yarışı ------------------------------------------------------
+
+
+def test_calisirken_kapatma_yarissiz(surec_kipi, monkeypatch):
+    monkeypatch.setenv("QC_SANDBOX_WORKERS", "2")
+    sandbox.run(pow, 1, 1, timeout=30)
+    hatalar: list[BaseException] = []
+
+    def cagir() -> None:
+        try:
+            sandbox.run(time.sleep, 3, timeout=20)
+        except (sandbox.SandboxCrashed, sandbox.SandboxTimeout):
+            pass
+        except BaseException as exc:  # noqa: BLE001
+            hatalar.append(exc)
+
+    iplikler = [threading.Thread(target=cagir) for _ in range(4)]
+    for iplik in iplikler:
+        iplik.start()
+    time.sleep(0.5)
+    sandbox.shutdown()  # istisnasız tamamlanmalı
+    for iplik in iplikler:
+        iplik.join(timeout=30)
+    assert not any(iplik.is_alive() for iplik in iplikler)
+    assert hatalar == []
+    # Eski nesilden hiçbir işçi ayakta kalmadı ya da yeni havuza sızmadı.
+    assert multiprocessing.active_children() == []
+    assert sandbox.run(pow, 2, 2, timeout=30) == 4
+    assert len(multiprocessing.active_children()) == 2
+
+
+# --- Reçete bekçileri ve CPU ---------------------------------------------
 
 
 def guvensiz_recete_dener(recete: str) -> str:
@@ -156,19 +358,16 @@ def test_cpu_kaldiraci_zaman_asimiyla_durdurulur(surec_kipi, recete):
     assert sandbox.run(guvensiz_recete_dener, "diff(3*x**2, x)", timeout=30) == "ISTISNA_YOK"
 
 
-def bellek_kaldiraci_dener(recete: str) -> str:
-    """İşçide ham `MemoryError`ı görünür kılar (mathenv onu `UnsafeExpression`e sarar)."""
-    from questioncrator.mathenv import parse
+# --- Bellek (yalnız Linux) -----------------------------------------------
 
-    try:
-        parse(recete)
-    except MemoryError:
-        return "MemoryError"
-    except Exception as exc:  # noqa: BLE001
-        cause = exc.__cause__
-        if isinstance(cause, MemoryError) or "bellek" in str(exc):
-            return "MemoryError"
-        return type(exc).__name__
+
+def bellek_kaldiraci_dener(recete: str) -> str:
+    """Başarıda metin döner; hata olduğu gibi yükselir.
+
+    Başarı sympy nesnesi döndürmez: aksi halde aktarım reddi (`SandboxCrashed`)
+    bellek hatasıyla karışırdı.
+    """
+    parse(recete)
     return "ISTISNA_YOK"
 
 
@@ -181,14 +380,15 @@ def isci_bellek_siniri() -> tuple[int, int]:
 @linux_gerekir
 @pytest.mark.parametrize("recete", ["Matrix([[1]]).rows << 8*10**9", "zeros(6000)"])
 def test_bellek_kaldiraci_iscide_sinirlanir(surec_kipi, monkeypatch, recete):
-    monkeypatch.setenv("QC_SANDBOX_MEMORY_MB", "256")
-    ebeveyn_pid = os.getpid()
-    try:
-        sonuc = sandbox.run(bellek_kaldiraci_dener, recete, timeout=60)
-    except sandbox.SandboxCrashed:
-        sonuc = "MemoryError"
-    assert sonuc == "MemoryError"
-    assert os.getpid() == ebeveyn_pid
+    monkeypatch.setenv("QC_SANDBOX_WORKERS", "1")
+    monkeypatch.setenv("QC_SANDBOX_MEMORY_MB", LINUX_TEST_BELLEK_MB)
+    eski = sandbox.run(os.getpid, timeout=30)
+    # MemoryError ham gelebilir ya da mathenv onu UnsafeExpression'a sarar; ikinci
+    # durumda MemoryError kökenini işçinin yenilenmesi (pid değişimi) kanıtlar:
+    # sandbox yalnız MemoryError zinciri taşıyan hatada işçiyi emekli eder.
+    with pytest.raises((MemoryError, UnsafeExpression, sandbox.SandboxCrashed)):
+        sandbox.run(bellek_kaldiraci_dener, recete, timeout=60)
+    assert sandbox.run(os.getpid, timeout=30) != eski
     assert sandbox.run(guvensiz_recete_dener, "diff(3*x**2, x)", timeout=30) == "ISTISNA_YOK"
 
 
@@ -196,9 +396,25 @@ def test_bellek_kaldiraci_iscide_sinirlanir(surec_kipi, monkeypatch, recete):
 def test_bellek_siniri_iscide_ebeveynde_degil(surec_kipi, monkeypatch):
     import resource
 
-    monkeypatch.setenv("QC_SANDBOX_MEMORY_MB", "256")
-    limit = 256 * 1024 * 1024
+    monkeypatch.setenv("QC_SANDBOX_MEMORY_MB", LINUX_TEST_BELLEK_MB)
+    limit = int(LINUX_TEST_BELLEK_MB) * 1024 * 1024
     assert sandbox.run(isci_bellek_siniri, timeout=30) == (limit, limit)
     assert resource.getrlimit(resource.RLIMIT_AS)[0] != limit
     # Önyükleme sınırdan etkilenmedi: bekçiler ve sympy işçide hazır.
     assert sandbox.run(isci_bekci_durumu, timeout=30) == (True, True, True)
+
+
+def bellek_hatasi_zinciri_firlat() -> None:
+    try:
+        raise MemoryError
+    except MemoryError as exc:
+        raise UnsafeExpression("sarılmış") from exc
+
+
+def test_bellek_hatasi_zinciri_isciyi_yeniler(surec_kipi, monkeypatch):
+    # Platformdan bağımsız: MemoryError kökenli hata işçiyi emekli eder.
+    monkeypatch.setenv("QC_SANDBOX_WORKERS", "1")
+    eski = sandbox.run(os.getpid, timeout=30)
+    with pytest.raises(UnsafeExpression):
+        sandbox.run(bellek_hatasi_zinciri_firlat, timeout=30)
+    assert sandbox.run(os.getpid, timeout=30) != eski
