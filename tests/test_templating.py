@@ -176,6 +176,13 @@ def test_sayim_uyusmazliginda_deger_sabit_kalir(metin, recete, sabit):
         ("$x_{2} + 2$", "2"),
         ("Bir kalem 2,5 TL", "Rational(5, 2)"),
         ("Bir kalem 2.5 TL", "Rational(5, 2)"),
+        # Numaralandırma / etiket: soru numarası reçetedeki literalle çakışsa da.
+        ("Soru 2: $f(x)=x^3$ fonksiyonunun ikinci türevi nedir?", "diff(x**3, x, 2)"),
+        ("2. $f(x)=x^3$ fonksiyonunun ikinci türevi nedir?", "diff(x**3, x, 2)"),
+        ("  > 3) $x^5$ ifadesinin üçüncü türevi nedir?", "diff(x**5, x, 3)"),
+        ("Giriş\n### Örnek 4. $x^5$ ifadesinin dördüncü türevi?", "diff(x**5, x, 4)"),
+        # Satır ortasındaki Türkçe sıra sayısı (`3. türev`).
+        ("$x^5$ ifadesinin 3. türevini bulunuz.", "diff(x**5, x, 3)"),
     ],
 )
 def test_guvensiz_baglamdaki_deger_hicbir_yerde_parametrelesmez(metin, recete):

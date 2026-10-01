@@ -38,6 +38,14 @@ _SUPERSCRIPT_RUN = re.compile("[⁰¹²³⁴⁵⁶⁷⁸⁹]+")
 _SUBSCRIPT_RUN = re.compile("[₀₁₂₃₄₅₆₇₈₉]+")
 _SCRIPT_TO_ASCII = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹₀₁₂₃₄₅₆₇₈₉", "01234567890123456789")
 _CLOSERS = {"{": "}", "[": "]"}
+# Satır başı numara/etiket: baştaki boşluk ve Markdown işaretlerinden
+# sonra isteğe bağlı tek kelime, sayı ve `.`/`)`/`:` (`2.`, `Soru 2:`).
+_LINE_NUMBERING = re.compile(
+    r"^[ \t]*(?:[#*>\-][ \t]*)*(?:[^\W\d_]+[ \t]+)?([0-9]+)[ \t]*[.):]", re.MULTILINE
+)
+# Sıra sayısı adayı: sayı, nokta, boşluk ve bir harf (`3. türev`); harfin
+# küçük olması `_numbering_regions` içinde denetlenir.
+_ORDINAL = re.compile(r"([0-9]+)\.[ \t]+([^\W\d_])")
 
 Span = tuple[int, int]
 # (jeton, değer, `**` sonrası mı)
@@ -154,6 +162,24 @@ def _script_regions(text: str) -> tuple[set[Span], list[Span]]:
     return exponents, unsafe
 
 
+def _numbering_regions(text: str) -> list[Span]:
+    """Metindeki numaralandırma/etiket sayıları: hepsi güvensiz bölgedir.
+
+    Soru numarası ya da sıra sayısı reçetedeki ilgisiz bir literalle sayıca
+    tutabilir; parametreleşirse metin anlamını yitirir (`Soru (-7):`,
+    `4. türev` okunurken cevabın başka bir türev olması). Kalıplar
+    yapısaldır, kelimenin kendisine bakılmaz:
+
+    - satır başı (boşluk ve `#`, `-`, `*`, `>` atlanarak) `N.`, `N)`, `N:`;
+    - aynı yerde tek kelime + `N.`/`N)`/`N:` (`Soru 2:`, `### Örnek 4)`);
+    - satır içinde küçük harfli kelimeden önce `N.` (Türkçe sıra sayısı).
+      Cümle sonu sayıyı büyük harf izlediği için etkilenmez.
+    """
+    regions = [m.span(1) for m in _LINE_NUMBERING.finditer(text)]
+    regions.extend(m.span(1) for m in _ORDINAL.finditer(text) if m.group(2).islower())
+    return regions
+
+
 def _classify(text: str, span: Span, exponents: set[Span], unsafe: list[Span]) -> str:
     """Değere birebir eşit bir rakam dizisinin sınıfı: S, E ya da U."""
     start, end = span
@@ -175,6 +201,7 @@ def _classify(text: str, span: Span, exponents: set[Span], unsafe: list[Span]) -
 def _text_occurrences(text: str, values: set[int]) -> dict[int, dict[str, list[Span]]]:
     """Her değerin metindeki geçişleri, sınıflarına göre."""
     exponents, unsafe = _script_regions(text)
+    unsafe += _numbering_regions(text)
     occurrences: dict[int, dict[str, list[Span]]] = {
         value: {SAFE: [], EXPONENT: [], UNSAFE: []} for value in values
     }
@@ -205,7 +232,8 @@ def _parametrizable_values(
     Bir değer v yalnız şunların HEPSİ sağlanırsa parametreleşir:
 
     - U boş: metinde karma üs, indis, kök derecesi, ondalık, harf ya da
-      rakam komşuluğu gibi hiçbir güvensiz geçiş yok;
+      rakam komşuluğu, numaralandırma/etiket ya da sıra sayısı gibi hiçbir
+      güvensiz geçiş yok;
     - |E| == |R_E|: metinde sabit kalan basit üsler, reçetede sabit kalan
       `**` üsleriyle sayıca eşleşiyor;
     - |S| == |R_S| >= 1: metinde değişecek her geçişin reçetede bir

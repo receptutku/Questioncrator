@@ -41,5 +41,12 @@
   {"id": "recetede-gizli-literal", "metin": "$x^2 + 2$ ifadesini sadeleştiriniz.", "recete": "x**2 + 2 + 2*0", "parametreler": []},
   {"id": "karma-us-ve-katsayi", "metin": "$e^{2x} + 2x$ ifadesini yazınız.", "recete": "exp(2*x) + 2*x", "parametreler": []},
   {"id": "ust-simge-ve-katsayi", "metin": "x² + 2x ifadesinin türevini bulunuz.", "recete": "diff(x**2 + 2*x, x)", "parametreler": [2]},
-  {"id": "markdown-kalin", "metin": "**Soru 3:** 3x + 5 ifadesinin türevini bulunuz.", "recete": "diff(3*x + 5, x)", "parametreler": [5]}
+  {"id": "markdown-kalin", "metin": "**Soru 3:** 3x + 5 ifadesinin türevini bulunuz.", "recete": "diff(3*x + 5, x)", "parametreler": [5]},
+  {"id": "soru-etiketi-turev-derecesi", "metin": "Soru 2: $f(x)=x^3$ fonksiyonunun ikinci türevi nedir?", "recete": "diff(x**3, x, 2)", "parametreler": []},
+  {"id": "satir-basi-liste-numarasi", "metin": "Aşağıdaki soruyu yanıtlayınız.\n2. $f(x) = x^4$ fonksiyonunun ikinci türevinin $x = 1$ için değeri kaçtır?", "recete": "diff(x**4, x, 2).subs(x, 1)", "parametreler": [1]},
+  {"id": "markdown-baslik-etiketi", "metin": "### Problem 3) $x^5$ ifadesinin üçüncü türevini bulunuz.", "recete": "diff(x**5, x, 3)", "parametreler": []},
+  {"id": "sira-sayisi-satir-ortasi", "metin": "$x^5$ ifadesinin 3. türevini bulunuz.", "recete": "diff(x**5, x, 3)", "parametreler": []},
+  {"id": "etiketli-soruda-diger-sayilar", "metin": "Soru 1: $3x + 5 = 11$ denkleminde $x$ kaçtır?", "recete": "solve(3*x + 5 - 11, x)", "parametreler": [3, 5, 11]},
+  {"id": "liste-icinde-satir-ortasi-sayi", "metin": "1) Ali'nin 4 elması vardı, 6 elma daha aldı. Kaç elması oldu?", "recete": "4 + 6", "parametreler": [4, 6]},
+  {"id": "cumle-sonu-sayi-sira-sayisi-degil", "metin": "Bir sayının 2 katı 8. Bu sayı kaçtır?", "recete": "Rational(8, 2)", "parametreler": [8, 2]}
 ]
