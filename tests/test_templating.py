@@ -208,3 +208,58 @@ def test_frac_icindeki_sayi_parametrelesmeye_devam_eder():
     s = kaynak(r"$\frac{3}{x^{2}}$", "3/x**2")
     t = extract.extract_template(s, "t1")
     assert t.skeleton == r"$\frac{{p0}}{x^{2}}$"
+
+
+# Metindeki sayı ancak nicelik olarak okunuyorsa parametreleşir: matematik
+# sınırlayıcıları dışındaki geçiş, olumlu nicelik kanıtı yoksa güvensizdir.
+_IKINCI_TUREV = "$f(x)=x^3$ fonksiyonunun ikinci türevi nedir?"
+
+
+@pytest.mark.parametrize(
+    ("metin", "recete"),
+    [
+        (f"**Soru 2** {_IKINCI_TUREV}", "diff(x**3, x, 2)"),
+        (f"Soru 2 - {_IKINCI_TUREV}", "diff(x**3, x, 2)"),
+        (f"Soru 2 {_IKINCI_TUREV}", "diff(x**3, x, 2)"),
+        (f" Soru 2: {_IKINCI_TUREV}", "diff(x**3, x, 2)"),
+        (f"(2) {_IKINCI_TUREV}", "diff(x**3, x, 2)"),
+        (f"+ 2. {_IKINCI_TUREV}", "diff(x**3, x, 2)"),
+        (f"Örnek Soru 2: {_IKINCI_TUREV}", "diff(x**3, x, 2)"),
+        ("$x^5$ ifadesinin 3.türevini bulunuz.", "diff(x**5, x, 3)"),
+    ],
+)
+def test_nicelik_kaniti_olmayan_sayi_parametrelesmez(metin, recete):
+    with pytest.raises(extract.NoParametersFound):
+        extract.extract_template(kaynak(metin, recete), "t1")
+
+
+@pytest.mark.parametrize("etiket", ["#2", "S2)", "2-)", "[2]", "**2.**", "2 |", "<2>", "2/"])
+@pytest.mark.parametrize("yer", ["{e} {s}", "Giriş\n{e} {s}", "Ödev {e}\n{s}"])
+def test_gorulmemis_etiket_bicimleri_kendiliginden_donar(etiket, yer):
+    """İlke özelliği: hiçbir etiket biçimi tek tek tanınmaz; nicelik kanıtı
+    taşımayan her biçim, nerede durursa dursun, sayıyı dondurur."""
+    metin = yer.format(e=etiket, s=_IKINCI_TUREV)
+    with pytest.raises(extract.NoParametersFound):
+        extract.extract_template(kaynak(metin, "diff(x**3, x, 2)"), "t1")
+
+
+@pytest.mark.parametrize(
+    ("metin", "recete", "baglama"),
+    [
+        ("2x + 3 = 5 denkleminde x kaçtır?", "solve(2*x + 3 - 5, x)", [2, 3, 5]),
+        ("3 elma ile 4 armut kaç meyve eder?", "3 + 4", [3, 4]),
+        ("12'nin 5'e bölümünden kalan kaçtır?", "Mod(12, 5)", [12, 5]),
+        ("%20'si 8 olan sayı kaçtır?", "8*100/20", [8, 20]),
+        ("[2, 1] dizisinin toplamı kaçtır?", "2 + 1", [2, 1]),
+        ("Aşağıdaki sayının karesi kaçtır?\n- 4", "4**2", [4]),
+        ("Aşağıdaki sayının karesi kaçtır?\r\n- 4\r\n", "4**2", [4]),
+        ("2x + 3 = 5 denkleminde\r\nx kaçtır?", "solve(2*x + 3 - 5, x)", [2, 3, 5]),
+        ("3 elma ile 4 armut kaç meyve eder?", "3 + 4", [3, 4]),
+        ("Bir sayının 2 katı 8. Bu sayı kaçtır?", "Rational(8, 2)", [8, 2]),
+        ("f(2) değeri, $f(x) = x + 3$ ise kaçtır?", "2 + 3", [2, 3]),
+    ],
+)
+def test_nicelik_kaniti_olan_sayi_parametrelesmeye_devam_eder(metin, recete, baglama):
+    t = extract.extract_template(kaynak(metin, recete), "t1")
+    assert [t.seed_bindings[p.name] for p in t.parameters] == baglama
+    assert render.render_text(t, t.seed_bindings) == metin

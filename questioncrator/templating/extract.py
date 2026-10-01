@@ -38,14 +38,22 @@ _SUPERSCRIPT_RUN = re.compile("[⁰¹²³⁴⁵⁶⁷⁸⁹]+")
 _SUBSCRIPT_RUN = re.compile("[₀₁₂₃₄₅₆₇₈₉]+")
 _SCRIPT_TO_ASCII = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹₀₁₂₃₄₅₆₇₈₉", "01234567890123456789")
 _CLOSERS = {"{": "}", "[": "]"}
-# Satır başı numara/etiket: baştaki boşluk ve Markdown işaretlerinden
-# sonra isteğe bağlı tek kelime, sayı ve `.`/`)`/`:` (`2.`, `Soru 2:`).
-_LINE_NUMBERING = re.compile(
-    r"^[ \t]*(?:[#*>\-][ \t]*)*(?:[^\W\d_]+[ \t]+)?([0-9]+)[ \t]*[.):]", re.MULTILINE
+# Matematik sınırlayıcıları: `$$…$$`, `$…$`, `\(…\)`, `\[…\]` (`\$` kaçışlıdır).
+_MATH_REGION = re.compile(
+    r"\$\$.+?\$\$|(?<!\\)\$.+?(?<!\\)\$|\\\(.+?\\\)|\\\[.+?\\\]", re.DOTALL
 )
-# Sıra sayısı adayı: sayı, nokta, boşluk ve bir harf (`3. türev`); harfin
-# küçük olması `_numbering_regions` içinde denetlenir.
-_ORDINAL = re.compile(r"([0-9]+)\.[ \t]+([^\W\d_])")
+# İşlemler; `**` tek işlem olarak `*`dan önce denenir. `–` aralık tiresidir.
+_OPERATORS = ("**", "+", "-", "−", "–", "*", "·", "×", "/", "÷", "=", "≠", "<", ">", "≤", "≥", "^")
+_SIGNS = ("+", "-", "−")
+_LETTER_RUN = re.compile(r"[^\W\d_]+")
+# Sayıya bitişik nicelik işaretleri: yüzde, derece, faktöriyel.
+_ADJACENT_MARKS = "%°!"
+_APOSTROPHES = "'’"
+# Satırın tek içeriği olan değerden önce durabilecekler: boşluk, alıntı `>`,
+# liste işareti ya da tek harfli seçenek etiketi (`A)`), isteğe bağlı işaret.
+_BARE_PREFIX = re.compile(
+    r"[^\S\n]*(?:>[^\S\n]*)*(?:(?:[-*+•]|[^\W\d_][.)])[^\S\n]+)?[-+−]?"
+)
 
 Span = tuple[int, int]
 # (jeton, değer, `**` sonrası mı)
@@ -162,28 +170,176 @@ def _script_regions(text: str) -> tuple[set[Span], list[Span]]:
     return exponents, unsafe
 
 
-def _numbering_regions(text: str) -> list[Span]:
-    """Metindeki numaralandırma/etiket sayıları: hepsi güvensiz bölgedir.
+def _math_regions(text: str) -> list[Span]:
+    return [m.span() for m in _MATH_REGION.finditer(text)]
 
-    Soru numarası ya da sıra sayısı reçetedeki ilgisiz bir literalle sayıca
-    tutabilir; parametreleşirse metin anlamını yitirir (`Soru (-7):`,
-    `4. türev` okunurken cevabın başka bir türev olması). Kalıplar
-    yapısaldır, kelimenin kendisine bakılmaz:
 
-    - satır başı (boşluk ve `#`, `-`, `*`, `>` atlanarak) `N.`, `N)`, `N:`;
-    - aynı yerde tek kelime + `N.`/`N)`/`N:` (`Soru 2:`, `### Örnek 4)`);
-    - satır içinde küçük harfli kelimeden önce `N.` (Türkçe sıra sayısı).
-      Cümle sonu sayıyı büyük harf izlediği için etkilenmez.
+def _skip_forward(text: str, index: int) -> int:
+    """Satır sonunu geçmeden yatay boşlukları (NBSP, `\\r` dahil) atlar."""
+    while index < len(text) and text[index] != "\n" and text[index].isspace():
+        index += 1
+    return index
+
+
+def _skip_back(text: str, index: int) -> int:
+    """`index`ten geriye, satır başını geçmeden yatay boşlukları atlar."""
+    while index > 0 and text[index - 1] != "\n" and text[index - 1].isspace():
+        index -= 1
+    return index
+
+
+def _operator_at(text: str, index: int) -> str | None:
+    return next((op for op in _OPERATORS if text.startswith(op, index)), None)
+
+
+def _operator_before(text: str, index: int) -> str | None:
+    return next((op for op in _OPERATORS if text.endswith(op, 0, index)), None)
+
+
+def _operand_starts(text: str, index: int) -> bool:
+    """`index`te bir işlenen başlıyor mu: rakam, açılan grup, LaTeX komutu,
+    tek harfli değişken ya da çağrılan fonksiyon (`sin(`). Çok harfli
+    düzyazı kelimesi (`Soru`, `Ek`) ve `$` işlenen değildir."""
+    char = text[index:index + 1]
+    if char.isdigit() or (char and char in "([{\\|"):
+        return True
+    if char in _SIGNS:
+        return _operand_starts(text, index + 1)
+    run = _LETTER_RUN.match(text, index)
+    return run is not None and (len(run.group()) == 1 or text.startswith("(", run.end()))
+
+
+def _operand_ends(text: str, index: int) -> bool:
+    """`index`ten hemen önce bir işlenen bitiyor mu: rakam (üst simge
+    dahil), kapanan grup, faktöriyel ya da tek harfli değişken."""
+    char = text[index - 1:index] if index > 0 else ""
+    if char.isdigit() or (char and char in ")]}|!"):
+        return True
+    return char.isalpha() and not text[index - 2:index - 1].isalpha()
+
+
+def _math_neighbour(text: str, start: int, end: int) -> bool:
+    """Sayı bir matematik ifadesinin parçası mı (nicelik kanıtı 1).
+
+    - iki yanındaki işlemin öbür tarafında bir işlenen var (`3 + x`,
+      `x^2`, `2x - 3`); işlenensiz işlem (`+ 2.` maddesi, `2-)`, `2 - $`)
+      kanıt değildir. Öndeki işaret açılan grup, virgül ya da başka bir
+      işlemden sonra da tekli işarettir (`= -3`, `(-2)`);
+    - bitişik değişken/birim harfi, üst simge ya da `%`, `°`, `!`
+      (`3x`, `5cm`, `3²`, `20%`, `30°`, `5!`);
+    - virgülle ayrılmış sayı dizisinin öğesi (`[2, 1]`);
+    - fonksiyon bağımsız değişkeni (`f(2)`).
     """
-    regions = [m.span(1) for m in _LINE_NUMBERING.finditer(text)]
-    regions.extend(m.span(1) for m in _ORDINAL.finditer(text) if m.group(2).islower())
-    return regions
+    after = _skip_forward(text, end)
+    op = _operator_at(text, after)
+    if op and _operand_starts(text, _skip_forward(text, after + len(op))):
+        return True
+    before = _skip_back(text, start)
+    op = _operator_before(text, before)
+    if op:
+        far = _skip_back(text, before - len(op))
+        if _operand_ends(text, far):
+            return True
+        if op in _SIGNS and far > 0 and (
+            text[far - 1] in "([{,;" or _operator_before(text, far)
+        ):
+            return True
+    if text[after:after + 1] in (",", ";"):
+        far = _skip_forward(text, after + 1)
+        if text[far:far + 1].isdigit() or (
+            text[far:far + 1] in _SIGNS and text[far + 1:far + 2].isdigit()
+        ):
+            return True
+    if before > 0 and text[before - 1] in ",;":
+        far = _skip_back(text, before - 1)
+        if far > 0 and text[far - 1].isdigit():
+            return True
+    if text[start - 1:start] == "(" and text[end:end + 1] == ")":
+        return text[start - 2:start - 1].isalpha()
+    following = text[end:end + 1]
+    return following.isalpha() or (following != "" and following in _ADJACENT_MARKS + "⁰¹²³⁴⁵⁶⁷⁸⁹")
 
 
-def _classify(text: str, span: Span, exponents: set[Span], unsafe: list[Span]) -> str:
-    """Değere birebir eşit bir rakam dizisinin sınıfı: S, E ya da U."""
+def _clause_continues(text: str, end: int) -> bool:
+    """Sayıdan sonra cümle sürüyor ya da bitiyor mu (etiket/sıra sayısı
+    sonu değil). `.` yalnız ardından büyük harf ya da satır sonu gelirse
+    cümle sonudur; `3. türev`, `3.türev`, `2. $…$`, `N:`, `N)` değildir."""
+    char = text[end:end + 1]
+    if char == "" or char.isspace() or char in ",;?":
+        return True
+    if char != ".":
+        return False
+    following = _skip_forward(text, end + 1)
+    if following >= len(text) or text[following] == "\n":
+        return True
+    return following > end + 1 and text[following].isupper()
+
+
+def _prose_neighbour(text: str, start: int, end: int) -> bool:
+    """Sayı düzyazıda bir nicelik mi (nicelik kanıtı 2).
+
+    - ardından boşluk ve küçük harfle başlayan kelime (`3 elma`, `5 cm`);
+    - bitişik kesme işaretli ek (`5'e`, `12'dir`) ya da önünde `%`;
+    - önünde küçük harfle başlayan kelime ve ardından cümle sürüyor ya da
+      bitiyor (`fiyatı 30 TL`, `2 katı 8.`). Büyük harfle başlayan kelime
+      (`Soru 2`) etikettir, kanıt değildir.
+    """
+    after = _skip_forward(text, end)
+    if after > end and text[after:after + 1].islower():
+        return True
+    if text[end:end + 1] in _APOSTROPHES and text[end + 1:end + 2].isalpha():
+        return True
+    if text[start - 1:start] == "%":
+        return True
+    before = _skip_back(text, start)
+    word_start = before
+    while word_start > 0 and (
+        text[word_start - 1].isalpha() or text[word_start - 1] in _APOSTROPHES
+    ):
+        word_start -= 1
+    word = text[word_start:before]
+    return (
+        before < start
+        and word[:1].islower()
+        and word[-1:].isalpha()
+        and _clause_continues(text, end)
+    )
+
+
+def _bare_value(text: str, start: int, end: int) -> bool:
+    """Sayı satırın ya da liste maddesinin tek içeriği mi (nicelik kanıtı 3):
+    `- 2`, `A) 2`, yalnız `2`."""
+    line_start = text.rfind("\n", 0, start) + 1
+    line_end = text.find("\n", end)
+    rest = text[end:line_end if line_end != -1 else len(text)]
+    return (rest == "" or rest.isspace()) and _BARE_PREFIX.fullmatch(
+        text, line_start, start
+    ) is not None
+
+
+def _has_quantity_evidence(text: str, start: int, end: int) -> bool:
+    return (
+        _math_neighbour(text, start, end)
+        or _prose_neighbour(text, start, end)
+        or _bare_value(text, start, end)
+    )
+
+
+def _classify(
+    text: str, span: Span, exponents: set[Span], unsafe: list[Span], math: list[Span]
+) -> str:
+    """Değere birebir eşit bir rakam dizisinin sınıfı: S, E ya da U.
+
+    Matematik sınırlayıcıları dışındaki geçiş varsayılan olarak U'dur;
+    yalnız olumlu nicelik kanıtı varsa aşağıdaki sınıflandırmaya girer.
+    Etiket, soru numarası, sıra sayısı gibi biçimler tek tek tanınmaz;
+    kanıt taşımadıkları için kendiliğinden U olurlar.
+    """
     start, end = span
     if any(u_start < end and start < u_end for u_start, u_end in unsafe):
+        return UNSAFE
+    inside_math = any(m_start < start and end < m_end for m_start, m_end in math)
+    if not inside_math and not _has_quantity_evidence(text, start, end):
         return UNSAFE
     before = text[start - 1:start]
     # Tanımlayıcı içi (`x2`, `\frac12`): sayı ayrı bir değer değildir.
@@ -201,14 +357,14 @@ def _classify(text: str, span: Span, exponents: set[Span], unsafe: list[Span]) -
 def _text_occurrences(text: str, values: set[int]) -> dict[int, dict[str, list[Span]]]:
     """Her değerin metindeki geçişleri, sınıflarına göre."""
     exponents, unsafe = _script_regions(text)
-    unsafe += _numbering_regions(text)
+    math = _math_regions(text)
     occurrences: dict[int, dict[str, list[Span]]] = {
         value: {SAFE: [], EXPONENT: [], UNSAFE: []} for value in values
     }
     for run in _DIGIT_RUN.finditer(text):
         for value in values:
             if run.group() == str(value):
-                kind = _classify(text, run.span(), exponents, unsafe)
+                kind = _classify(text, run.span(), exponents, unsafe, math)
                 occurrences[value][kind].append(run.span())
             elif str(value) in run.group():
                 # Başka bir rakam dizisinin içi (`12` içindeki `2`).
@@ -232,8 +388,8 @@ def _parametrizable_values(
     Bir değer v yalnız şunların HEPSİ sağlanırsa parametreleşir:
 
     - U boş: metinde karma üs, indis, kök derecesi, ondalık, harf ya da
-      rakam komşuluğu, numaralandırma/etiket ya da sıra sayısı gibi hiçbir
-      güvensiz geçiş yok;
+      rakam komşuluğu ya da matematik dışında nicelik kanıtı olmayan
+      (etiket, soru numarası, sıra sayısı…) hiçbir güvensiz geçiş yok;
     - |E| == |R_E|: metinde sabit kalan basit üsler, reçetede sabit kalan
       `**` üsleriyle sayıca eşleşiyor;
     - |S| == |R_S| >= 1: metinde değişecek her geçişin reçetede bir
